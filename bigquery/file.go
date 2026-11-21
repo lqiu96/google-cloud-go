@@ -21,19 +21,32 @@ import (
 )
 
 // A ReaderSource is a source for a load operation that gets
-// data from an io.Reader.
+// data from an [io.Reader]. Format and schema options (such as SourceFormat,
+// Schema, and AutoDetect) are configured on the embedded [FileConfig], rather
+// than on [Loader].
 //
-// When a ReaderSource is part of a LoadConfig obtained via Job.Config,
-// its internal io.Reader will be nil, so it cannot be used for a
+// Uploads from a ReaderSource are not automatically retried on transient
+// errors because the underlying [io.Reader] cannot be rewound. If you pass a
+// freshly written *os.File or other io.ReadSeeker, rewind it to the beginning
+// (for example with Seek(0, 0)) before calling [Loader.Run], or zero rows will
+// be read from EOF.
+//
+// When a ReaderSource is part of a [LoadConfig] obtained via [Job.Config],
+// its internal [io.Reader] will be nil, so it cannot be used for a
 // subsequent load operation.
 type ReaderSource struct {
 	r io.Reader
 	FileConfig
 }
 
-// NewReaderSource creates a ReaderSource from an io.Reader. You may
-// optionally configure properties on the ReaderSource that describe the
-// data being read, before passing it to Table.LoaderFrom.
+// NewReaderSource creates a [ReaderSource] from an [io.Reader]. Configure
+// embedded [FileConfig] properties (such as SourceFormat, Schema, and
+// AutoDetect) on the returned ReaderSource before passing it to
+// [Table.LoaderFrom].
+//
+// Uploads from a ReaderSource are not automatically retried on transient
+// errors. Rewind freshly written files (for example with Seek(0, 0)) before
+// loading.
 func NewReaderSource(r io.Reader) *ReaderSource {
 	return &ReaderSource{r: r}
 }
@@ -45,8 +58,12 @@ func (r *ReaderSource) populateLoadConfig(lc *bq.JobConfigurationLoad) io.Reader
 
 // FileConfig contains configuration options that pertain to files, typically
 // text files that require interpretation to be used as a BigQuery table. A
-// file may live in Google Cloud Storage (see GCSReference), or it may be
-// loaded into a table via the Table.LoaderFromReader.
+// file may live in Google Cloud Storage (see [GCSReference]), or it may be
+// loaded into a table via [Table.LoaderFrom] with [NewReaderSource] (for
+// example, Table.LoaderFrom(NewReaderSource(r))).
+//
+// FileConfig is embedded in [GCSReference] and [ReaderSource], so format and
+// schema options are set on the [LoadSource] rather than on [Loader].
 type FileConfig struct {
 	// SourceFormat is the format of the data to be read.
 	// Allowed values are: Avro, CSV, DatastoreBackup, JSON, ORC, and Parquet.  The default is CSV.
@@ -79,6 +96,8 @@ type FileConfig struct {
 	ParquetOptions *ParquetOptions
 
 	// Additional options for Avro files.
+	// For load jobs, if AvroOptions is non-nil, AvroOptions.UseAvroLogicalTypes
+	// takes precedence over [LoadConfig.UseAvroLogicalTypes].
 	AvroOptions *AvroOptions
 
 	// Time zone used when parsing timestamp values that do not
@@ -190,7 +209,7 @@ func (fc *FileConfig) populateExternalDataConfig(conf *bq.ExternalDataConfigurat
 }
 
 // Encoding specifies the character encoding of data to be loaded into BigQuery.
-// See https://cloud.google.com/bigquery/docs/reference/v2/jobs#configuration.load.encoding
+// See https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/Job#JobConfigurationLoad.FIELDS.encoding
 // for more details about how this is used.
 type Encoding string
 

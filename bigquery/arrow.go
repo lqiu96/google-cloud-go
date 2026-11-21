@@ -30,7 +30,8 @@ import (
 	"google.golang.org/api/iterator"
 )
 
-// ArrowRecordBatch represents an Arrow RecordBatch with the source PartitionID
+// ArrowRecordBatch represents a serialized Apache Arrow record batch along with
+// its source partition ID.
 type ArrowRecordBatch struct {
 	reader io.Reader
 	// Serialized Arrow Record Batch.
@@ -41,7 +42,8 @@ type ArrowRecordBatch struct {
 	PartitionID string
 }
 
-// Read makes ArrowRecordBatch implements io.Reader
+// Read implements [io.Reader] by streaming the serialized Arrow schema followed
+// by the record batch data.
 func (r *ArrowRecordBatch) Read(p []byte) (int, error) {
 	if r.reader == nil {
 		buf := bytes.NewBuffer(r.Schema)
@@ -51,7 +53,18 @@ func (r *ArrowRecordBatch) Read(p []byte) (int, error) {
 	return r.reader.Read(p)
 }
 
-// ArrowIterator represents a way to iterate through a stream of arrow records.
+// ArrowIterator iterates through a stream of raw Apache Arrow record batches
+// obtained from [RowIterator.ArrowIterator] when [RowIterator.IsAccelerated] is
+// true.
+//
+// Do not mix [ArrowIterator.Next] with [RowIterator.Next] on the same
+// [RowIterator]. Next returns [iterator.Done] when all streams complete. Cancel
+// the iterator's context if stopping early to release background worker
+// goroutines. [RowIterator.StartIndex] and [RowIterator.PageInfo] pagination
+// are unsupported for Storage Read streams. Note that built-in Arrow decoding
+// in [RowIterator.Next] does not currently support BigQuery INTERVAL columns,
+// whereas ArrowIterator exposes the raw serialized Arrow batches directly.
+//
 // Experimental: this interface is experimental and may be modified or removed in future versions,
 // regardless of any other documented package stability guarantees.
 type ArrowIterator interface {
@@ -60,7 +73,10 @@ type ArrowIterator interface {
 	SerializedArrowSchema() []byte
 }
 
-// NewArrowIteratorReader allows to consume an ArrowIterator as an io.Reader.
+// NewArrowIteratorReader wraps an [ArrowIterator] as an [io.Reader] that yields
+// a serialized Apache Arrow IPC stream (schema followed by record batches).
+// Cancel the underlying iterator's context if stopping before [io.EOF].
+//
 // Experimental: this interface is experimental and may be modified or removed in future versions,
 // regardless of any other documented package stability guarantees.
 func NewArrowIteratorReader(it ArrowIterator) io.Reader {

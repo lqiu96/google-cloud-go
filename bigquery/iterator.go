@@ -44,6 +44,10 @@ func newRowIterator(ctx context.Context, src *rowSource, pf pageFetcher) *RowIte
 }
 
 // A RowIterator provides access to the result of a BigQuery lookup.
+//
+// RowIterator is not safe for concurrent use by multiple goroutines.
+// When [RowIterator.IsAccelerated] is true, cancel the iterator's context if
+// stopping before [iterator.Done] to avoid leaking background worker goroutines.
 type RowIterator struct {
 	ctx context.Context
 	src *rowSource
@@ -55,31 +59,36 @@ type RowIterator struct {
 	nextFunc func() error
 	pf       pageFetcher
 
-	// StartIndex can be set before the first call to Next. If PageInfo().Token
-	// is also set, StartIndex is ignored. If Storage API is enabled,
-	// StartIndex is also ignored because is not supported. IsAccelerated()
-	// method can be called to check if Storage API is enabled for the RowIterator.
+	// StartIndex can be set before the first call to [RowIterator.Next]. If
+	// PageInfo().Token is also set, StartIndex is ignored. If the Storage Read
+	// API is active, StartIndex is ignored because it is not supported. Call
+	// [RowIterator.IsAccelerated] to check whether the Storage Read API is
+	// active for this RowIterator.
 	StartIndex uint64
 
-	// The schema of the table.
-	// In some scenarios it will only be available after the first
-	// call to Next(), like when a call to Query.Read uses
-	// the jobs.query API for an optimized query path.
+	// The schema of the table or query result.
+	// Schema is nil until after the first call to [RowIterator.Next] for REST
+	// [Table.Read] iterators and for [Query.Read] fast-path iterators.
 	Schema Schema
 
 	// The total number of rows in the result.
-	// In some scenarios it will only be available after the first
-	// call to Next(), like when a call to Query.Read uses
-	// the jobs.query API for an optimized query path.
-	// May be zero just after rows were inserted.
+	// TotalRows is zero until after the first call to [RowIterator.Next] for
+	// REST [Table.Read] iterators and for [Query.Read] fast-path iterators.
+	// When [RowIterator.IsAccelerated] is true, TotalRows is an estimate from
+	// the Storage Read session and may not be exact. TotalRows excludes rows
+	// still in the streaming buffer, so it may be zero or understated shortly
+	// after streaming inserts.
 	TotalRows uint64
 
 	rows         [][]Value
 	structLoader structLoader // used to populate a pointer to a struct
 }
 
-// SourceJob returns an instance of a Job if the RowIterator is backed by a query,
-// or a nil.
+// SourceJob returns the backing [Job] if the RowIterator is backed by a
+// BigQuery job, or nil otherwise. SourceJob returns nil for direct table reads
+// and for queries executed without a job (for example under
+// [JobCreationModeOptional]). For jobless queries, use [RowIterator.QueryID] to
+// identify the query.
 func (ri *RowIterator) SourceJob() *Job {
 	if ri.src == nil {
 		return nil
@@ -95,7 +104,9 @@ func (ri *RowIterator) SourceJob() *Job {
 	}
 }
 
-// QueryID returns a query ID if available, or an empty string.
+// QueryID returns the query ID if available (including for queries executed
+// without a job under [JobCreationModeOptional], where [RowIterator.SourceJob]
+// returns nil), or an empty string.
 func (ri *RowIterator) QueryID() string {
 	if ri.src == nil {
 		return ""
@@ -108,25 +119,34 @@ func (ri *RowIterator) QueryID() string {
 // implementations (e.g. to enable testing).
 type pageFetcher func(ctx context.Context, _ *rowSource, _ Schema, startIndex uint64, pageSize int64, pageToken string) (*fetchPageResult, error)
 
-// Next loads the next row into dst. Its return value is iterator.Done if there
-// are no more results. Once Next returns iterator.Done, all subsequent calls
-// will return iterator.Done.
+// Next loads the next row into dst. Its return value is [iterator.Done] (from
+// package google.golang.org/api/iterator) if there are no more results. Once
+// Next returns iterator.Done, all subsequent calls will return iterator.Done.
 //
-// dst may implement ValueLoader, or may be a *[]Value, *map[string]Value, or struct pointer.
+// dst may implement [ValueLoader], or may be a *[]Value, *map[string]Value, or
+// struct pointer.
 //
-// If dst is a *[]Value, it will be set to new []Value whose i'th element
-// will be populated with the i'th column of the row.
+// Declare a fresh destination variable inside each loop iteration if you retain
+// rows across calls. *[]Value, *map[string]Value, and repeated struct fields
+// reuse existing backing storage in place, and existing map keys or unmatched
+// struct fields are not cleared between calls.
 //
-// If dst is a *map[string]Value, a new map will be created if dst is nil. Then
+// If dst is a *[]Value, its length is reset to zero and the i'th element is
+// populated with the i'th column of the row (reusing the underlying array when
+// capacity permits).
+//
+// If dst is a *map[string]Value, a new map will be created if *dst is nil. Then
 // for each schema column name, the map key of that name will be set to the column's
 // value. STRUCT types (RECORD types or nested schemas) become nested maps.
 //
-// If dst is pointer to a struct, each column in the schema will be matched
-// with an exported field of the struct that has the same name, ignoring case.
-// Unmatched schema columns and struct fields will be ignored.
+// If dst is a pointer to a struct, each column in the schema will be matched
+// with an exported field of the struct that has the same name (or bigquery
+// struct tag), ignoring case. Unmatched schema columns and struct fields will
+// be ignored.
 //
-// Each BigQuery column type corresponds to one or more Go types; a matching struct
-// field must be of the correct type. The correspondences are:
+// Each BigQuery column type corresponds to one or more Go types. A matching
+// struct field must be of the correct type (civil types are from
+// cloud.google.com/go/civil). The correspondences are:
 //
 //	STRING      string
 //	BOOL        bool
@@ -139,24 +159,35 @@ type pageFetcher func(ctx context.Context, _ *rowSource, _ Schema, startIndex ui
 //	DATETIME    civil.DateTime
 //	NUMERIC     *big.Rat
 //	BIGNUMERIC  *big.Rat
+//	GEOGRAPHY   string
+//	JSON        string
+//	INTERVAL    *IntervalValue (only via *[]Value or *map[string]Value)
+//	RANGE       *RangeValue
+//
+// JSON columns can only be scanned into string or [NullJSON] struct fields (not
+// map[string]any or bigquery:",json" structs). INTERVAL columns cannot currently
+// be scanned directly into struct fields (scan into *[]Value or
+// *map[string]Value instead).
 //
 // The big.Rat type supports numbers of arbitrary size and precision.
-// See https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types#numeric-type
+// See https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-types#numeric-type
 // for more on NUMERIC.
 //
 // A repeated field corresponds to a slice or array of the element type. BigQuery translates
 // NULL arrays into an empty array, so we follow that behavior.
-// See https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types#array_nulls
+// See https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-types#array_nulls
 // for more about NULL and empty arrays.
 //
 // A STRUCT type (RECORD or nested schema) corresponds to a nested struct or struct pointer.
 // All calls to Next on the same iterator must use the same struct type.
 //
 // It is an error to attempt to read a BigQuery NULL value into a struct field,
-// unless the field is of type []byte or is one of the special Null types: NullInt64,
-// NullFloat64, NullBool, NullString, NullTimestamp, NullDate, NullTime or
-// NullDateTime. You can also use a *[]Value or *map[string]Value to read from a
-// table with NULLs.
+// unless the field is of type []byte, *big.Rat, *[RangeValue], a struct pointer,
+// or one of the special Null types: [NullInt64], [NullFloat64], [NullBool],
+// [NullString], [NullGeography], [NullJSON], [NullTimestamp], [NullDate],
+// [NullTime], or [NullDateTime]. Scalar pointers (such as *string or *int64)
+// and database/sql.Null* types are not supported. You can also use a *[]Value
+// or *map[string]Value to read from a table with NULLs.
 func (it *RowIterator) Next(dst any) error {
 	var vl ValueLoader
 	switch dst := dst.(type) {
@@ -193,9 +224,20 @@ func isStructPtr(x any) bool {
 	return t.Kind() == reflect.Pointer && t.Elem().Kind() == reflect.Struct
 }
 
-// PageInfo supports pagination. See the google.golang.org/api/iterator package for details.
-// Currently pagination is not supported when the Storage API is enabled. IsAccelerated()
-// method can be called to check if Storage API is enabled for the RowIterator.
+// PageInfo supports pagination. See the google.golang.org/api/iterator package
+// for details. Set PageInfo().MaxSize before the first call to
+// [RowIterator.Next] to control page size (equivalent to the REST maxResults
+// parameter).
+//
+// For out-of-process pagination of query results, persist the job ID, location,
+// and PageInfo().Token, then open the job in the next request with
+// [Client.JobFromIDLocation] (or [Client.JobFromProject]) and call [Job.Read]
+// with PageInfo().Token set, rather than re-running the query.
+//
+// Pagination is not supported when the Storage Read API is active
+// ([RowIterator.IsAccelerated] returns true). On an accelerated iterator,
+// PageInfo().Token and PageInfo().MaxSize are ignored, and calling
+// PageInfo().Remaining() or iterator.NewPager will panic.
 func (it *RowIterator) PageInfo() *iterator.PageInfo { return it.pageInfo }
 
 func (it *RowIterator) fetch(pageSize int, pageToken string) (string, error) {

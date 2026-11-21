@@ -27,8 +27,12 @@ import (
 // Schema describes the fields in a table or query result.
 type Schema []*FieldSchema
 
-// Relax returns a version of the schema where no fields are marked
-// as Required.
+// Relax returns a copy of the schema where no fields are marked as Required.
+//
+// Note that Relax currently preserves only Name, Description, Repeated, Type,
+// and nested Schema fields, and drops other [FieldSchema] attributes such as
+// PolicyTags, MaxLength, Precision, Scale, DefaultValueExpression, Collation,
+// RangeElementType, RoundingMode, and TimestampPrecision.
 func (s Schema) Relax() Schema {
 	var out Schema
 	for _, v := range s {
@@ -139,7 +143,7 @@ type FieldSchema struct {
 	//   - SESSION_USER
 	//   - ST_GEOGPOINT
 	//   - Struct or array composed with the above allowed functions, for example:
-	//       [CURRENT_DATE(), DATE '2020-01-01']"
+	//       [CURRENT_DATE(), DATE '2020-01-01']
 	DefaultValueExpression string
 
 	// Collation can be set only when the type of field is STRING.
@@ -300,7 +304,7 @@ const (
 	StringFieldType FieldType = "STRING"
 	// BytesFieldType is a bytes field type.
 	BytesFieldType FieldType = "BYTES"
-	// IntegerFieldType is a integer field type.
+	// IntegerFieldType is an integer field type.
 	IntegerFieldType FieldType = "INTEGER"
 	// FloatFieldType is a float field type.
 	FloatFieldType FieldType = "FLOAT"
@@ -366,12 +370,23 @@ var (
 
 var typeOfByteSlice = reflect.TypeFor[[]byte]()
 
-// InferSchema tries to derive a BigQuery schema from the supplied struct value.
-// Each exported struct field is mapped to a field in the schema.
+// InferSchema tries to derive a BigQuery schema from the supplied struct value
+// (or pointer to a struct). Each exported struct field is mapped to a field in
+// the schema. Unexported fields are ignored.
 //
-// The following BigQuery types are inferred from the corresponding Go types.
-// (This is the same mapping as that used for RowIterator.Next.) Fields inferred
-// from these types are marked required (non-nullable).
+// Inferred non-Null fields default to REQUIRED (Required: true), which is the
+// opposite of BigQuery SQL DDL (where columns default to NULLABLE). Use Null*
+// types, the bigquery:",nullable" tag on supported types, or [Schema.Relax] if
+// you need nullable columns.
+//
+// Do not mutate the returned [Schema] or its *[FieldSchema] elements in place,
+// because inferred schemas are cached by type across calls. Make a copy before
+// modifying fields (for example to set [BigNumericFieldType] or
+// [FieldSchema.RangeElementType]).
+//
+// The following BigQuery types are inferred from the corresponding Go types
+// (civil types are from cloud.google.com/go/civil). Fields inferred from these
+// types are marked required (non-nullable):
 //
 //	STRING      string
 //	BOOL        bool
@@ -383,29 +398,41 @@ var typeOfByteSlice = reflect.TypeFor[[]byte]()
 //	TIME        civil.Time
 //	DATETIME    civil.DateTime
 //	NUMERIC     *big.Rat
-//	JSON        map[string]interface{}
+//	JSON        map[string]T (any map with string keys) or struct with bigquery:",json"
 //
-// The big.Rat type supports numbers of arbitrary size and precision. Values
-// will be rounded to 9 digits after the decimal point before being transmitted
-// to BigQuery. See https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types#numeric-type
+// The *big.Rat type supports numbers of arbitrary size and precision and always
+// infers NUMERIC. Values are rounded to 9 digits after the decimal point before
+// being transmitted to BigQuery. For BIGNUMERIC, copy the inferred schema and
+// set the field's Type to [BigNumericFieldType]. See
+// https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-types#numeric-type
 // for more on NUMERIC.
+//
+// Note that while map[string]T and bigquery:",json" struct fields infer JSON,
+// [RowIterator.Next] can only scan JSON columns into string or [NullJSON]
+// struct fields.
 //
 // A Go slice or array type is inferred to be a BigQuery repeated field of the
 // element type. The element type must be one of the above listed types.
 //
-// Due to lack of unique native Go type for GEOGRAPHY, there is no schema
-// inference to GEOGRAPHY at this time.
+// Due to the lack of a unique native Go type for GEOGRAPHY, there is no
+// non-nullable schema inference to GEOGRAPHY. Use [NullGeography] for
+// GEOGRAPHY fields.
 //
-// This package also provides some value types for expressing the corresponding SQL types.
+// This package also provides value types for expressing INTERVAL and RANGE:
 //
-// INTERVAL		*IntervalValue
-// RANGE    	*RangeValue
+//	INTERVAL    *IntervalValue
+//	RANGE       *RangeValue
 //
-// In the case of RANGE types, a RANGE represents a continuous set of values of a given
-// element type (DATE, DATETIME, or TIMESTAMP).  InferSchema does not attempt to determine
-// the element type, as it uses generic Value types to denote the start/end of the range.
+// Although *[IntervalValue] infers INTERVAL and works with [StructSaver] and
+// [QueryParameter], [RowIterator.Next] cannot currently scan INTERVAL columns
+// into struct fields (scan into *[]Value or *map[string]Value instead).
 //
-// Nullable fields are inferred from the NullXXX types, declared in this package:
+// In the case of RANGE types, a RANGE represents a continuous set of values of
+// a given element type (DATE, DATETIME, or TIMESTAMP). InferSchema does not
+// determine the element type, so copy the inferred schema and set
+// [FieldSchema.RangeElementType] before creating a table.
+//
+// Nullable fields are inferred from the Null* types declared in this package:
 //
 //	STRING      NullString
 //	BOOL        NullBool
@@ -416,9 +443,12 @@ var typeOfByteSlice = reflect.TypeFor[[]byte]()
 //	TIME        NullTime
 //	DATETIME    NullDateTime
 //	GEOGRAPHY   NullGeography
+//	JSON        NullJSON
 //
-// For a nullable BYTES field, use the type []byte and tag the field "nullable" (see below).
-// For a nullable NUMERIC field, use the type *big.Rat and tag the field "nullable".
+// For nullable BYTES, NUMERIC, INTERVAL, RANGE, or nested RECORD fields, use
+// []byte, *big.Rat, *[IntervalValue], *[RangeValue], or a struct pointer and
+// tag the field with bigquery:",nullable" (see below). Scalar pointers (such as
+// *string or *int64) and database/sql.Null* types are not supported.
 //
 // A struct field that is of struct type is inferred to be a required field of type
 // RECORD with a schema inferred recursively. For backwards compatibility, a field of
@@ -426,8 +456,9 @@ var typeOfByteSlice = reflect.TypeFor[[]byte]()
 // field, use the "nullable" tag (see below).
 //
 // InferSchema returns an error if any of the examined fields is of type uint,
-// uint64, uintptr, map, interface, complex64, complex128, func, or chan. Future
-// versions may handle these cases without error.
+// uint64, uintptr, a map with non-string keys, interface, complex64,
+// complex128, func, chan, or a pointer to a non-struct type. Future versions
+// may handle these cases without error.
 //
 // Recursively defined structs are also disallowed.
 //
@@ -443,10 +474,17 @@ var typeOfByteSlice = reflect.TypeFor[[]byte]()
 //
 // omits the field from the inferred schema.
 // The "nullable" option marks the field as nullable (not required). It is only
-// needed for []byte, *big.Rat and pointer-to-struct fields, and cannot appear on other
-// fields. In this example, the Go name of the field is retained:
+// allowed on []byte, *big.Rat, *[IntervalValue], *[RangeValue], and
+// pointer-to-struct fields (not on maps or scalar fields). In this example, the
+// Go name of the field is retained:
 //
 //	bigquery:",nullable"
+//
+// The "json" option marks a struct or pointer-to-struct field as a BigQuery
+// JSON column instead of RECORD (and may be combined with "nullable" on struct
+// pointers, as in bigquery:",json,nullable"):
+//
+//	bigquery:",json"
 func InferSchema(st any) (Schema, error) {
 	return inferSchemaReflectCached(reflect.TypeOf(st))
 }
