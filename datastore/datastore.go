@@ -83,13 +83,15 @@ const retryPolicy = `{
 // ScopeDatastore grants permissions to view and/or manage datastore entities
 const ScopeDatastore = "https://www.googleapis.com/auth/datastore"
 
-// DetectProjectID is a sentinel value that instructs NewClient to detect the
-// project ID. It is given in place of the projectID argument. NewClient will
-// use the project ID from the given credentials or the default credentials
-// (https://developers.google.com/accounts/docs/application-default-credentials)
-// if no credentials were provided. When providing credentials, not all
-// options will allow NewClient to extract the project ID. Specifically a JWT
-// does not have the project ID encoded.
+// DetectProjectID is a sentinel value that instructs [NewClient] and
+// [NewClientWithDatabase] to detect the project ID from the provided
+// credentials or Application Default Credentials
+// (https://docs.cloud.google.com/docs/authentication/application-default-credentials).
+// Not all credential types include a project ID (for example, JWT credentials).
+//
+// When DATASTORE_EMULATOR_HOST is set, DetectProjectID ignores credential
+// detection errors and falls back to "dummy-emulator-datastore-project". Passing
+// "" instead reads DATASTORE_PROJECT_ID and fails if that variable is unset.
 const DetectProjectID = "*detect-project-id*"
 
 // resourcePrefixHeader is the name of the metadata header used to indicate
@@ -99,7 +101,9 @@ const resourcePrefixHeader = "google-cloud-resource-prefix"
 // reqParamsHeader is routing header required to access named databases
 const reqParamsHeader = "x-goog-request-params"
 
-// DefaultDatabaseID is ID of the default database denoted by an empty string
+// DefaultDatabaseID is the ID of the default Datastore database, represented by
+// an empty string (""). Unlike Cloud Firestore, "(default)" is rejected by the
+// Datastore API.
 const DefaultDatabaseID = ""
 
 var (
@@ -108,7 +112,14 @@ var (
 	schemeRegexp         = regexp.MustCompile("^(http://|https://|passthrough:///)")
 )
 
-// Client is a client for reading and writing data in a datastore dataset.
+// Client is a client for reading and writing data in a Cloud Datastore (or
+// Firestore in Datastore mode) database over gRPC. Each Client targets a single
+// (projectID, databaseID) pair. Create a separate Client for each database.
+//
+// Clients should be reused instead of created per request. Methods on Client are
+// safe for concurrent use by multiple goroutines, except [Client.WithReadOptions]
+// and [Client.Close]. [Transaction], [Iterator], and [AggregationQuery] are not
+// safe for concurrent use. Call [Client.Close] when finished.
 type Client struct {
 	connPool     gtransport.ConnPool
 	client       pb.DatastoreClient
@@ -118,13 +129,26 @@ type Client struct {
 	config       *datastoreConfig
 }
 
-// NewClient creates a new Client for a given dataset.  If the project ID is
-// empty, it is derived from the DATASTORE_PROJECT_ID environment variable.
-// If the DATASTORE_EMULATOR_HOST environment variable is set, client will use
-// its value to connect to a locally-running datastore emulator.
-// DetectProjectID can be passed as the projectID argument to instruct
-// NewClient to detect the project ID from the credentials.
-// Call (*Client).Close() when done with the client.
+// NewClient creates a new [Client] connected to the default database
+// ([DefaultDatabaseID]). Use [NewClientWithDatabase] to connect to a named
+// database.
+//
+// If projectID is "", it is read from the DATASTORE_PROJECT_ID environment
+// variable (failing if unset, even when using the emulator). Pass
+// [DetectProjectID] to detect the project ID from credentials (falling back to
+// "dummy-emulator-datastore-project" when DATASTORE_EMULATOR_HOST is set).
+//
+// If DATASTORE_EMULATOR_HOST is set, the client connects to that address with
+// authentication disabled and insecure gRPC credentials. Do not cancel or set a
+// short timeout on ctx, as it governs background credential setup for the
+// client's lifetime.
+//
+// By default, RPCs use a 60-second timeout with waitForReady enabled and
+// automatic retries (up to 5 attempts) on UNAVAILABLE for all RPCs (including
+// non-transactional writes) and on DEADLINE_EXCEEDED, INTERNAL, and
+// RESOURCE_EXHAUSTED for reads (Lookup, RunQuery, RunAggregationQuery, and
+// ReserveIds). Pass a shorter per-call context deadline for fail-fast calls.
+// Call [Client.Close] when finished.
 func NewClient(ctx context.Context, projectID string, opts ...option.ClientOption) (*Client, error) {
 	client, err := NewClientWithDatabase(ctx, projectID, DefaultDatabaseID, opts...)
 	if err != nil {
@@ -133,13 +157,19 @@ func NewClient(ctx context.Context, projectID string, opts ...option.ClientOptio
 	return client, nil
 }
 
-// NewClientWithDatabase creates a new Client for given dataset and database.
-// If the project ID is empty, it is derived from the DATASTORE_PROJECT_ID environment variable.
-// If the DATASTORE_EMULATOR_HOST environment variable is set, client will use
-// its value to connect to a locally-running datastore emulator.
-// DetectProjectID can be passed as the projectID argument to instruct
-// NewClientWithDatabase to detect the project ID from the credentials.
-// Call (*Client).Close() when done with the client.
+// NewClientWithDatabase creates a new [Client] for the given project and
+// database. Pass [DefaultDatabaseID] ("") for the default database. Unlike
+// Cloud Firestore, "(default)" is rejected by the Datastore API.
+//
+// If projectID is "", it is read from DATASTORE_PROJECT_ID (failing if unset).
+// Pass [DetectProjectID] to detect the project ID from credentials (falling back
+// to "dummy-emulator-datastore-project" when DATASTORE_EMULATOR_HOST is set).
+//
+// If DATASTORE_EMULATOR_HOST is set, authentication is disabled and insecure
+// gRPC credentials are used automatically. Do not cancel or set a short timeout
+// on ctx, as it governs background credential setup for the client's lifetime.
+// See [NewClient] for default RPC timeout and retry behavior. Call [Client.Close]
+// when finished.
 func NewClientWithDatabase(ctx context.Context, projectID, databaseID string, opts ...option.ClientOption) (*Client, error) {
 	var o []option.ClientOption
 	keepaliveParams := keepalive.ClientParameters{
@@ -149,7 +179,7 @@ func NewClientWithDatabase(ctx context.Context, projectID, databaseID string, op
 	}
 
 	// Environment variables for gcd emulator:
-	// https://cloud.google.com/datastore/docs/tools/datastore-emulator
+	// https://docs.cloud.google.com/datastore/docs/tools/datastore-emulator
 	// If the emulator is available, dial it without passing any credentials.
 	if addr := os.Getenv("DATASTORE_EMULATOR_HOST"); addr != "" {
 		// If it's already a valid gRPC target with a non-HTTP scheme (like unix:///), leave it.
@@ -260,11 +290,15 @@ const (
 	multiArgTypeInterface
 )
 
-// ErrFieldMismatch is returned when a field is to be loaded into a different
-// type than the one it was stored from, or when a field is missing or
-// unexported in the destination struct.
-// StructType is the type of the struct pointed to by the destination argument
-// passed to Get or to Iterator.Next.
+// ErrFieldMismatch is returned when a stored property cannot be loaded into a
+// destination struct field because of a type mismatch, overflow, or missing or
+// unexported field. StructType is the type of the struct pointed to by dst.
+//
+// All other matching fields are still loaded into dst when ErrFieldMismatch is
+// returned. If multiple fields mismatch, only one mismatch is reported (which
+// field is reported is non-deterministic). In [Iterator.Next], the entity's key
+// is still returned and the iterator advances normally. Use
+// [WithIgnoreFieldMismatch] to ignore this error on [Client] reads.
 type ErrFieldMismatch struct {
 	StructType reflect.Type
 	FieldName  string
@@ -354,7 +388,7 @@ func multiKeyToProto(keys []*Key) []*pb.Key {
 	return ret
 }
 
-// multiKeyToProto is a batch version of keyToProto.
+// multiProtoToKey is a batch version of protoToKey.
 func multiProtoToKey(keys []*pb.Key) ([]*Key, error) {
 	hasErr := false
 	ret := make([]*Key, len(keys))
@@ -470,24 +504,25 @@ func ignoreFieldMismatchErr(err error) error {
 	return err
 }
 
-// Close closes the Client. Call Close to clean up resources when done with the
-// Client.
+// Close closes the Client and releases its underlying gRPC connection pool.
+// Call Close when done with the Client, and do not call it concurrently with
+// other Client methods.
 func (c *Client) Close() error {
 	return c.connPool.Close()
 }
 
 // Get loads the entity stored for key into dst, which must be a struct pointer
-// or implement PropertyLoadSaver. If there is no such entity for the key, Get
-// returns ErrNoSuchEntity.
+// or implement [PropertyLoadSaver]. If there is no such entity for the key, Get
+// returns [ErrNoSuchEntity].
 //
-// The values of dst's unmatched struct fields are not modified, and matching
-// slice-typed fields are not reset before appending to them. In particular, it
-// is recommended to pass a pointer to a zero valued struct on each Get call.
+// Unmatched struct fields in dst are not modified. For matching slice-typed
+// fields, pre-populated elements are overwritten starting at index 0 and any
+// trailing elements beyond the loaded array length are retained. Always pass a
+// pointer to a fresh zero-valued struct on each Get call.
 //
-// ErrFieldMismatch is returned when a field is to be loaded into a different
-// type than the one it was stored from, or when a field is missing or
-// unexported in the destination struct. ErrFieldMismatch is only returned if
-// dst is a struct pointer.
+// *[ErrFieldMismatch] is returned only if dst is a struct pointer. Matching
+// fields are still loaded into dst, and only one mismatch is reported if
+// multiple exist.
 func (c *Client) Get(ctx context.Context, key *Key, dst interface{}) (err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/datastore.Get")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -515,18 +550,23 @@ func (c *Client) Get(ctx context.Context, key *Key, dst interface{}) (err error)
 	return c.processFieldMismatchError(err)
 }
 
-// GetMulti is a batch version of Get.
+// GetMulti is a batch version of [Client.Get].
 //
-// dst must be a []S, []*S, []I or []P, for some struct type S, some interface
-// type I, or some non-interface non-pointer type P such that P or *P
-// implements PropertyLoadSaver. If an []I, each element must be a valid dst
-// for Get: it must be a struct pointer or implement PropertyLoadSaver.
+// dst must be a slice value (not a pointer to a slice, unlike [Client.GetAll])
+// pre-sized to len(keys), or [ErrDifferentKeyAndDstLength] is returned. Its type
+// must be []S, []*S, []I, or []P for some struct type S, interface type I, or
+// non-interface non-pointer type P such that P or *P implements
+// [PropertyLoadSaver]. For []I, each element must be a valid dst for Get.
+// As a special case, [PropertyList] is rejected as dst (use []PropertyList).
 //
-// As a special case, PropertyList is an invalid type for dst, even though a
-// PropertyList is a slice of structs. It is treated as invalid to avoid being
-// mistakenly passed when []PropertyList was intended.
+// Datastore allows at most 1,000 keys per lookup request, and GetMulti does not
+// automatically chunk larger slices. Deferred keys in a lookup response are
+// fetched automatically.
 //
-// err may be a MultiError. See ExampleMultiError to check it.
+// Per-entity errors (such as [ErrNoSuchEntity] or *[ErrFieldMismatch]) are
+// returned as a [MultiError] aligned 1:1 with keys, while whole-call RPC or
+// context errors are returned directly. Because [MultiError] does not implement
+// Unwrap, extract it with errors.As(err, &me) and inspect me[i].
 func (c *Client) GetMulti(ctx context.Context, keys []*Key, dst interface{}) (err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/datastore.GetMulti")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -552,7 +592,7 @@ func (c *Client) get(ctx context.Context, keys []*Key, dst interface{}, opts *pb
 
 	var multiArgType multiArgType
 
-	// If kind is of type slice, return error
+	// If kind is not of type slice, return error.
 	if kind := v.Kind(); kind != reflect.Slice {
 		return nil, fmt.Errorf("%w: dst: expected slice got %v", ErrInvalidEntityType, kind.String())
 	}
@@ -683,13 +723,20 @@ func (c *Client) get(ctx context.Context, keys []*Key, dst interface{}, opts *pb
 	return txnID, nil
 }
 
-// PutRequest represents a single entity's data along with any options for its
-// mutation within a commit operation.
+// PutRequest represents a single entity's data along with any server-side
+// transforms for [Client.PutWithOptions], [Client.PutMultiWithOptions], and
+// their [Transaction] equivalents.
+//
+// PutRequest does not support a property mask, so the entire entity is
+// overwritten with Entity before Transforms are applied. To apply transforms
+// without overwriting existing properties, use [Client.Mutate] (or
+// [Transaction.Mutate]) with [NewUpsert] or [NewUpdate], an empty
+// [Mutation.WithPropertyMask](), and [Mutation.WithTransforms].
 type PutRequest struct {
 	// Key is the entity's key. It is required for all operations.
 	Key *Key
 	// Entity is the data to be saved. It must be a struct pointer or
-	// implement PropertyLoadSaver.
+	// implement [PropertyLoadSaver].
 	Entity interface{}
 	// Transforms is an optional slice of server-side transformations to apply
 	// to the entity's properties. The transforms are applied atomically
@@ -698,25 +745,34 @@ type PutRequest struct {
 }
 
 // Put saves the entity src into the datastore with the given key. src must be
-// a struct pointer or implement PropertyLoadSaver; if the struct pointer has
-// any unexported fields they will be skipped. If the key is incomplete, the
-// returned key will be a unique key generated by the datastore.
+// a struct pointer or implement [PropertyLoadSaver]. Unexported struct fields
+// are skipped.
+//
+// If key already exists, Put overwrites the entire entity (use [Client.Mutate]
+// with [Mutation.WithPropertyMask] for partial updates). If key is incomplete,
+// Put returns a newly generated complete key and does not mutate the input key.
+//
+// All struct fields are indexed by default. Strings and []byte values longer
+// than 1,500 bytes must be tagged `datastore:",noindex"`, strings must be valid
+// UTF-8, and an entity may have at most 20,000 indexed properties.
 func (c *Client) Put(ctx context.Context, key *Key, src interface{}) (*Key, error) {
 	return c.PutWithOptions(ctx, &PutRequest{Key: key, Entity: src})
 }
 
-// A PutOption is an optional argument to PutWithOptions and PutMultiWithOptions.
+// A PutOption is an optional argument to [Client.PutWithOptions] and [Client.PutMultiWithOptions].
 type PutOption interface {
 	isPutOption()
 }
 
-// PutWithOptions saves a single entity, applying the options defined in the PutRequest.
-// The PutRequest struct bundles the Key, the entity data (src), and any server-side
-// PropertyTransforms to be applied atomically.
+// PutWithOptions saves a single entity and applies any [PropertyTransform]
+// operations in req.Transforms atomically on the server in slice order.
 //
-// If the PutRequest's Key is incomplete, the returned key will be a unique key
-// generated by the datastore. Otherwise, the operation is an upsert.
-// Transforms are applied by the server in the order they are provided in the PutRequest.
+// If req.Key is incomplete, the returned key is a unique key generated by
+// Datastore and the input req.Key is not mutated. Otherwise, PutWithOptions
+// overwrites the entire entity with req.Entity before applying req.Transforms.
+// To apply transforms without overwriting existing properties, use
+// [Client.Mutate] with [NewUpsert] or [NewUpdate], an empty
+// [Mutation.WithPropertyMask](), and [Mutation.WithTransforms].
 func (c *Client) PutWithOptions(ctx context.Context, req *PutRequest, opts ...PutOption) (*Key, error) {
 	k, err := c.PutMultiWithOptions(ctx, []*PutRequest{req})
 	if err != nil {
@@ -728,21 +784,31 @@ func (c *Client) PutWithOptions(ctx context.Context, req *PutRequest, opts ...Pu
 	return k[0], nil
 }
 
-// PutMulti is a batch version of [*Client.Put].
+// PutMulti is a batch version of [Client.Put].
 //
-// src must satisfy the same conditions as the dst argument to GetMulti.
-// err may be a MultiError. See ExampleMultiError to check it.
+// src must be a slice value pre-sized to len(keys) satisfying the same
+// conditions as dst in [Client.GetMulti] (not a pointer to a slice). Input
+// incomplete keys are not mutated.
+//
+// Writes are committed in NON_TRANSACTIONAL mode (not atomic across entities).
+// Datastore allows at most 500 entities per commit, and PutMulti does not
+// automatically chunk larger slices. Duplicate keys in a single PutMulti call
+// fail on the server. Per-entity validation errors return [MultiError], while
+// whole-call RPC errors are returned directly.
 func (c *Client) PutMulti(ctx context.Context, keys []*Key, src interface{}) (ret []*Key, err error) {
 	// TODO(jba): rewrite in terms of Mutate.
 	return c.putMultiInternal(ctx, keys, src, nil)
 }
 
-// PutMultiWithOptions is a batch version of [*Client.PutWithOptions].
+// PutMultiWithOptions is a batch version of [Client.PutWithOptions].
 //
-// It takes a slice of PutRequest structs, where each struct specifies the Key,
-// the entity data, and any server-side transforms for a single item in the batch.
-// The returned keys will be in the same order as the input items.
-// err may be a MultiError. See ExampleMultiError to check it.
+// Each [PutRequest] replaces its entire entity before applying its transforms
+// (use [Client.Mutate] with an empty [Mutation.WithPropertyMask]() for
+// transform-only updates). Writes are committed in NON_TRANSACTIONAL mode (not
+// atomic across entities), with a server limit of 500 entities per commit and
+// no automatic chunking. The returned keys match the order of reqs, and input
+// incomplete keys are not mutated. Per-entity validation errors return
+// [MultiError], while whole-call RPC errors are returned directly.
 func (c *Client) PutMultiWithOptions(ctx context.Context, reqs []*PutRequest, opts ...PutOption) (ret []*Key, err error) {
 	var keys []*Key
 	var transforms [][]PropertyTransform
@@ -797,7 +863,7 @@ func putMutations(keys []*Key, src interface{}, transforms [][]PropertyTransform
 	v := reflect.ValueOf(src)
 	var multiArgType multiArgType
 
-	// If kind is of type slice, return error
+	// If kind is not of type slice, return error.
 	if kind := v.Kind(); kind != reflect.Slice {
 		return nil, fmt.Errorf("%w: dst: expected slice got %v", ErrInvalidEntityType, kind.String())
 	}
@@ -887,7 +953,8 @@ func putMutations(keys []*Key, src interface{}, transforms [][]PropertyTransform
 	return mutations, nil
 }
 
-// Delete deletes the entity for the given key.
+// Delete deletes the entity for the given key. Deleting a nonexistent key
+// succeeds without error.
 func (c *Client) Delete(ctx context.Context, key *Key) error {
 	err := c.DeleteMulti(ctx, []*Key{key})
 	if me, ok := err.(MultiError); ok {
@@ -896,9 +963,13 @@ func (c *Client) Delete(ctx context.Context, key *Key) error {
 	return err
 }
 
-// DeleteMulti is a batch version of Delete.
+// DeleteMulti is a batch version of [Client.Delete]. Deleting nonexistent keys
+// succeeds without error.
 //
-// err may be a MultiError. See ExampleMultiError to check it.
+// Deletions are committed in NON_TRANSACTIONAL mode (not atomic across
+// entities), subject to Datastore's 500-entity per-commit limit with no
+// automatic chunking. Per-key validation errors return [MultiError], while
+// whole-call RPC errors are returned directly.
 func (c *Client) DeleteMulti(ctx context.Context, keys []*Key) (err error) {
 	// TODO(jba): rewrite in terms of Mutate.
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/datastore.DeleteMulti")
@@ -947,13 +1018,16 @@ func deleteMutations(keys []*Key) ([]*pb.Mutation, error) {
 	return mutations, nil
 }
 
-// Mutate applies one or more mutations. Mutations are applied in
-// non-transactional mode. If you need atomicity, use Transaction.Mutate.
-// It returns the keys of the argument Mutations, in the same order.
+// Mutate applies one or more mutations in NON_TRANSACTIONAL mode (not atomic
+// across entities). If you need atomicity, use [Transaction.Mutate]. Datastore
+// allows at most 500 entities per commit, and Mutate does not automatically
+// chunk larger batches.
 //
-// If any of the mutations are invalid, Mutate returns a MultiError with the errors.
-// Mutate returns a MultiError in this case even if there is only one Mutation.
-// See ExampleMultiError to check it.
+// Mutate returns the keys of muts in the same order without mutating incomplete
+// input keys. If any mutation has a client-side validation error, Mutate returns
+// a [MultiError] even when only one mutation was passed. Whole-call RPC errors
+// (such as gRPC codes.NotFound for [NewUpdate] or codes.AlreadyExists for
+// [NewInsert]) are returned directly.
 func (c *Client) Mutate(ctx context.Context, muts ...*Mutation) (ret []*Key, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/datastore.Mutate")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -988,7 +1062,9 @@ func (c *Client) Mutate(ctx context.Context, muts ...*Mutation) (ret []*Key, err
 	return ret, nil
 }
 
-// ReadTime specifies a snapshot (time) of the database to read.
+// ReadTime specifies a snapshot timestamp of the database to read entities from.
+// Pass ReadTime(time.Time{}) to [Client.WithReadOptions] to clear a previously
+// configured read time.
 func ReadTime(t time.Time) ReadOption {
 	return docReadTime(t)
 }
@@ -999,8 +1075,8 @@ func (drt docReadTime) apply(rs *readSettings) {
 	rs.readTime = time.Time(drt)
 }
 
-// ReadOption provides specific instructions for how to access documents in the database.
-// Currently, only ReadTime is supported.
+// ReadOption provides instructions for how to access entities in the database.
+// Currently, only [ReadTime] is supported.
 type ReadOption interface {
 	apply(*readSettings)
 }
@@ -1013,10 +1089,14 @@ func (rs *readSettings) readTimeExists() bool {
 	return rs != nil && !rs.readTime.IsZero()
 }
 
-// WithReadOptions specifies constraints for accessing documents from the database,
-// e.g. at what time snapshot to read the documents.
-// The client uses this value for subsequent reads, unless additional ReadOptions
-// are provided.
+// WithReadOptions configures read constraints for accessing entities from the
+// database, such as reading at a point-in-time snapshot via [ReadTime].
+//
+// WithReadOptions mutates the receiver [Client] in place without locking and is
+// not safe to call concurrently with reads on a shared Client. The configured
+// options apply to all subsequent reads until cleared with
+// ReadTime(time.Time{}). Client-level [ReadTime] is incompatible with
+// transactions and [Query.EventualConsistency].
 func (c *Client) WithReadOptions(ro ...ReadOption) *Client {
 	for _, r := range ro {
 		r.apply(c.readSettings)

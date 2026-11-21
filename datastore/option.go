@@ -43,14 +43,16 @@ type datastoreClientOption interface {
 	applyDatastoreOpt(*datastoreConfig)
 }
 
-// WithIgnoreFieldMismatch allows ignoring ErrFieldMismatch error while
-// reading or querying data.
-// WARNING: Ignoring ErrFieldMismatch can cause data loss while writing
-// back to Datastore. E.g.
-// if entity written to Datastore is {X: 1, Y:2} and it is read into
-// type NewStruct struct{X int}, then {X:1} is returned.
-// Now, if this is written back to Datastore, there will be no Y field
-// left for this entity in Datastore
+// WithIgnoreFieldMismatch configures the [Client] to ignore *[ErrFieldMismatch]
+// errors during read and query operations ([Client.Get], [Client.GetMulti],
+// [Client.GetAll], [Iterator.Next], [Transaction.Get], and [Transaction.GetMulti]).
+// It does not affect standalone [LoadStruct] calls, and it does not suppress
+// *[ErrFieldMismatch] if wrapped by a custom [PropertyLoadSaver].
+//
+// WARNING: Ignoring *[ErrFieldMismatch] can cause data loss when writing back
+// to Datastore. For example, if a stored entity has {X: 1, Y: 2} and is loaded
+// into struct{ X int }, writing that struct back with [Client.Put] overwrites
+// the entity and drops Y.
 func WithIgnoreFieldMismatch() option.ClientOption {
 	return &withIgnoreFieldMismatch{ignoreFieldMismatchErrors: true}
 }

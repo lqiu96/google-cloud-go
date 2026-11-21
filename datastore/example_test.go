@@ -30,6 +30,7 @@ func ExampleNewClient() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 	_ = client // TODO: Use client.
 }
 
@@ -39,6 +40,7 @@ func ExampleClient_Get() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 
 	type Article struct {
 		Title       string
@@ -60,6 +62,7 @@ func ExampleClient_Put() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 
 	type Article struct {
 		Title       string
@@ -87,6 +90,7 @@ func ExampleClient_Put_flatten() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer client.Close()
 
 	type Animal struct {
 		Name  string
@@ -121,6 +125,7 @@ func ExampleClient_Delete() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 
 	key := datastore.NameKey("Article", "articled1", nil)
 	if err := client.Delete(ctx, key); err != nil {
@@ -134,6 +139,7 @@ func ExampleClient_DeleteMulti() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 	var keys []*datastore.Key
 	for i := 1; i <= 10; i++ {
 		keys = append(keys, datastore.IDKey("Article", int64(i), nil))
@@ -155,6 +161,7 @@ func ExampleClient_GetMulti() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 
 	keys := []*datastore.Key{
 		datastore.NameKey("Post", "post1", nil),
@@ -173,6 +180,7 @@ func ExampleMultiError() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 
 	keys := []*datastore.Key{
 		datastore.NameKey("bad-key", "bad-key", nil),
@@ -196,6 +204,7 @@ func ExampleClient_PutMulti_slice() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 
 	keys := []*datastore.Key{
 		datastore.NameKey("Post", "post1", nil),
@@ -218,6 +227,7 @@ func ExampleClient_PutMulti_interfaceSlice() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 
 	keys := []*datastore.Key{
 		datastore.NameKey("Post", "post1", nil),
@@ -254,6 +264,7 @@ func ExampleClient_Count() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 	// Count the number of the post entities.
 	q := datastore.NewQuery("Post")
 	n, err := client.Count(ctx, q)
@@ -269,6 +280,7 @@ func ExampleClient_Run() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 	// List the posts published since yesterday.
 	yesterday := time.Now().Add(-24 * time.Hour)
 	q := datastore.NewQuery("Post").FilterField("PublishedAt", ">", yesterday)
@@ -282,18 +294,20 @@ func ExampleClient_NewTransaction() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 	const retries = 3
 
 	// Increment a counter.
-	// See https://cloud.google.com/appengine/articles/sharding_counters for
-	// a more scalable solution.
+	// For high-contention counters, use distributed counters
+	// (https://docs.cloud.google.com/firestore/native/docs/solutions/counters)
+	// or a server-side datastore.Increment property transform.
 	type Counter struct {
 		Count int
 	}
 
 	key := datastore.NameKey("counter", "CounterA", nil)
-	var tx *datastore.Transaction
 	for range retries {
+		var tx *datastore.Transaction
 		tx, err = client.NewTransaction(ctx)
 		if err != nil {
 			break
@@ -301,17 +315,25 @@ func ExampleClient_NewTransaction() {
 
 		var c Counter
 		if err = tx.Get(key, &c); err != nil && err != datastore.ErrNoSuchEntity {
+			_ = tx.Rollback()
 			break
 		}
 		c.Count++
 		if _, err = tx.Put(key, &c); err != nil {
+			_ = tx.Rollback()
 			break
 		}
 
-		// Attempt to commit the transaction. If there's a conflict, try again.
-		if _, err = tx.Commit(); err != datastore.ErrConcurrentTransaction {
+		// Attempt to commit the transaction. If there is a conflict, roll back
+		// and try again.
+		if _, err = tx.Commit(); err != nil {
+			_ = tx.Rollback()
+			if err == datastore.ErrConcurrentTransaction {
+				continue
+			}
 			break
 		}
+		break
 	}
 	if err != nil {
 		// TODO: Handle error.
@@ -324,10 +346,12 @@ func ExampleClient_RunInTransaction() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 
 	// Increment a counter.
-	// See https://cloud.google.com/appengine/articles/sharding_counters for
-	// a more scalable solution.
+	// For high-contention counters, use distributed counters
+	// (https://docs.cloud.google.com/firestore/native/docs/solutions/counters)
+	// or a server-side datastore.Increment property transform.
 	type Counter struct {
 		Count int
 	}
@@ -360,6 +384,7 @@ func ExampleClient_AllocateIDs() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 	var keys []*datastore.Key
 	for range 10 {
 		keys = append(keys, datastore.IncompleteKey("Article", nil))
@@ -411,6 +436,7 @@ func ExampleClient_GetAll() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 	var posts []*Post
 	keys, err := client.GetAll(ctx, datastore.NewQuery("Post"), &posts)
 	if err != nil {
@@ -428,6 +454,7 @@ func ExampleClient_Mutate() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 
 	key1 := datastore.NameKey("Post", "post1", nil)
 	key2 := datastore.NameKey("Post", "post2", nil)
@@ -435,9 +462,9 @@ func ExampleClient_Mutate() {
 	key4 := datastore.NameKey("Post", "post4", nil)
 
 	_, err = client.Mutate(ctx,
-		datastore.NewInsert(key1, Post{Title: "Post 1"}),
-		datastore.NewUpsert(key2, Post{Title: "Post 2"}),
-		datastore.NewUpdate(key3, Post{Title: "Post 3"}),
+		datastore.NewInsert(key1, &Post{Title: "Post 1"}),
+		datastore.NewUpsert(key2, &Post{Title: "Post 2"}),
+		datastore.NewUpdate(key3, &Post{Title: "Post 3"}),
 		datastore.NewDelete(key4))
 	if err != nil {
 		// TODO: Handle error.
@@ -450,6 +477,7 @@ func ExampleCommit_Key() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 	var pk1, pk2 *datastore.PendingKey
 	// Create two posts in a single transaction.
 	commit, err := client.RunInTransaction(ctx, func(tx *datastore.Transaction) error {
@@ -480,6 +508,7 @@ func ExampleIterator_Next() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 	it := client.Run(ctx, datastore.NewQuery("Post"))
 	for {
 		var p Post
@@ -500,6 +529,7 @@ func ExampleIterator_Cursor() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 	it := client.Run(ctx, datastore.NewQuery("Post"))
 	for {
 		var p Post
@@ -517,7 +547,7 @@ func ExampleIterator_Cursor() {
 		}
 		// When printed, a cursor will display as a string that can be passed
 		// to datastore.DecodeCursor.
-		fmt.Printf("to resume with this post, use cursor %s\n", cursor)
+		fmt.Printf("to resume with the next post, use cursor %s\n", cursor)
 	}
 }
 
@@ -543,6 +573,7 @@ func ExampleQuery_Start() {
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 	// getCursor represents a function that returns a cursor from a previous
 	// iteration in string form.
 	cursorString := getCursor()

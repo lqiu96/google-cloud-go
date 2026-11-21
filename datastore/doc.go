@@ -13,42 +13,77 @@
 // limitations under the License.
 
 /*
-Package datastore provides a client for Google Cloud Datastore.
+Package datastore provides a client for Google Cloud Datastore (and Cloud
+Firestore in Datastore mode).
 
-See https://godoc.org/cloud.google.com/go for authentication, timeouts,
-connection pooling and similar aspects of this package.
+See https://pkg.go.dev/cloud.google.com/go for authentication, timeouts,
+connection pooling, and similar aspects of this package.
+
+# Choosing a Package
+
+  - cloud.google.com/go/datastore (this package): Data-plane client for Cloud
+    Datastore and Firestore in Datastore mode.
+  - cloud.google.com/go/datastore/apiv1/datastorepb: Protocol Buffer message
+    types only (there is no generated datastore/apiv1 Go client). Import this
+    package when unpacking *datastorepb.Value values from [AggregationResult].
+  - cloud.google.com/go/datastore/admin/apiv1: Generated admin client for
+    exports, imports, and composite index management.
+  - cloud.google.com/go/firestore: Use this package instead for databases in
+    Firestore Native mode (see
+    https://docs.cloud.google.com/datastore/docs/firestore-or-datastore).
+
+# Client Lifecycle and Concurrency
+
+Create a single [Client] per (projectID, databaseID) pair and reuse it across
+the application. Call [Client.Close] when finished to release the gRPC
+connection pool. Use [NewClient] for the default database ([DefaultDatabaseID],
+"") or [NewClientWithDatabase] for a named database. Unlike Cloud Firestore,
+"(default)" is rejected by the Datastore API.
+
+Do not cancel or set a short timeout on the context passed to [NewClient] or
+[NewClientWithDatabase], as it governs background credential setup for the
+client's lifetime.
+
+Methods on [Client] are safe for concurrent use by multiple goroutines, except
+[Client.WithReadOptions] and [Client.Close]. [Transaction], [Iterator], and
+[AggregationQuery] are not safe for concurrent use.
 
 # Basic Operations
 
-Entities are the unit of storage and are associated with a key. A key
-consists of an optional parent key, a string application ID, a string kind
-(also known as an entity type), and either a StringID or an IntID. A
-StringID is also known as an entity name or key name.
+Entities are the unit of storage and are associated with a [Key]. A key
+consists of an optional parent key, an optional namespace, a string kind
+(also known as an entity type), and either a string Name or an integer ID.
 
-It is valid to create a key with a zero StringID and a zero IntID; this is
-called an incomplete key, and does not refer to any saved entity. Putting an
-entity into the datastore under an incomplete key will cause a unique key
-to be generated for that entity, with a non-zero IntID.
+It is valid to create a key with a zero Name and a zero ID. This is called an
+incomplete key and does not refer to any saved entity. Putting an entity into
+Datastore under an incomplete key generates a unique complete key with a
+non-zero ID (the input key is not mutated).
 
 An entity's contents are a mapping from case-sensitive field names to values.
-Valid value types are:
-  - Signed integers (int, int8, int16, int32 and int64)
+Valid struct field types are:
+  - Signed integers (int, int8, int16, int32, and int64)
   - bool
-  - string
+  - string (must be valid UTF-8)
   - float32 and float64
-  - []byte (up to 1 megabyte in length)
+  - []byte (up to 1 megabyte in length, indexed by default up to 1,500 bytes)
   - Any type whose underlying type is one of the above predeclared types
   - *Key
   - GeoPoint
   - time.Time (stored with microsecond precision, retrieved as UTC)
+  - interface{} (holding a supported value type or nil)
   - Structs whose fields are all valid value types
   - Pointers to structs whose fields are all valid value types
-  - Slices of any of the above
-  - Pointers to a signed integer, bool, string, float32, or float64
+  - Slices of any of the above (except slices of slices other than [][]byte)
+  - Pointers to a signed integer, bool, string, float32, float64, time.Time,
+    GeoPoint, or []byte
+
+Unsigned integer types (uint, uint8, uint16, uint32, uint64) and Go map types
+are not supported as struct fields. Use [PropertyList] or implement
+[PropertyLoadSaver] for dynamic or map-like entities.
 
 Slices of structs are valid, as are structs that contain slices.
 
-The Get and Put functions load and save an entity's contents. An entity's
+[Client.Get] and [Client.Put] load and save an entity's contents. An entity's
 contents are typically represented by a struct pointer.
 
 Example code:
@@ -84,26 +119,25 @@ Example code:
 		fmt.Printf("Updated value from %q to %q\n", old, e.Value)
 	}
 
-GetMulti, PutMulti and DeleteMulti are batch versions of the Get, Put and
-Delete functions. They take a []*Key instead of a *Key, and may return a
-datastore.MultiError when encountering partial failure.
+[Client.GetMulti], [Client.PutMulti], and [Client.DeleteMulti] are batch
+versions of Get, Put, and Delete. They take a []*Key instead of a *Key and may
+return a [MultiError] when encountering per-entity failures.
 
-Mutate generalizes PutMulti and DeleteMulti to a sequence of any Datastore
-mutations. It takes a series of mutations created with NewInsert, NewUpdate,
-NewUpsert and NewDelete and applies them. Datastore.Mutate uses
-non-transactional mode; if atomicity is required, use Transaction.Mutate
-instead.
+[Client.Mutate] generalizes PutMulti and DeleteMulti to a sequence of any
+Datastore mutations created with [NewInsert], [NewUpdate], [NewUpsert], and
+[NewDelete]. Client.Mutate uses non-transactional mode. If atomicity is
+required, use [Transaction.Mutate] instead.
 
 # Properties
 
 An entity's contents can be represented by a variety of types. These are
 typically struct pointers, but can also be any type that implements the
-PropertyLoadSaver interface. If using a struct pointer, you do not have to
-explicitly implement the PropertyLoadSaver interface; the datastore will
-automatically convert via reflection. If a struct pointer does implement
-PropertyLoadSaver then those methods will be used in preference to the default
-behavior for struct pointers. Struct pointers are more strongly typed and are
-easier to use; PropertyLoadSavers are more flexible.
+[PropertyLoadSaver] interface. If using a struct pointer, you do not have to
+explicitly implement PropertyLoadSaver. The datastore package automatically
+converts via reflection. If a struct pointer does implement PropertyLoadSaver,
+those methods are used in preference to the default behavior for struct
+pointers. Struct pointers are more strongly typed and easier to use.
+PropertyLoadSavers are more flexible.
 
 The actual types passed do not have to match between Get and Put calls or even
 across different calls to datastore. It is valid to put a *PropertyList and
@@ -111,12 +145,14 @@ get that same entity as a *myStruct, or put a *myStruct0 and get a *myStruct1.
 Conceptually, any entity is saved as a sequence of properties, and is loaded
 into the destination value on a property-by-property basis. When loading into
 a struct pointer, an entity that cannot be completely represented (such as a
-missing field) will result in an ErrFieldMismatch error but it is up to the
-caller whether this error is fatal, recoverable or ignorable.
+missing field or type mismatch) returns an *[ErrFieldMismatch] error while
+still loading all other matching fields. If multiple fields mismatch, only one
+non-deterministic mismatch is reported. Callers may ignore ErrFieldMismatch
+individually or pass [WithIgnoreFieldMismatch] to [NewClient] for Client reads.
 
-By default, for struct pointers, all properties are potentially indexed, and
-the property name is the same as the field name (and hence must start with an
-upper case letter).
+By default, for struct pointers, all exported fields are indexed, and the
+property name is the same as the field name (unexported fields are skipped on
+save).
 
 Fields may have a `datastore:"name,options"` tag. The tag name is the
 property name, which must be one or more valid Go identifiers joined by ".",
@@ -132,9 +168,14 @@ empty slice or string. (Empty slices are never saved, even without
 "omitempty".) Other structs, including GeoPoint, are never considered empty.
 
 If options include "noindex" then the field will not be indexed. All fields
-are indexed by default. Strings or byte slices longer than 1500 bytes cannot
-be indexed; fields used to store long strings and byte slices must be tagged
-with "noindex" or they will cause Put operations to fail.
+are indexed by default, including []byte (unlike legacy App Engine Datastore,
+there is no separate ByteString type, and []byte values up to 1,500 bytes can
+be filtered in queries directly). Indexed string and []byte properties are
+limited to 1,500 bytes, strings must be valid UTF-8, and an entity may have at
+most 20,000 indexed properties (counting each element of an indexed slice).
+Tag fields holding longer strings or binary blobs with a leading comma,
+`datastore:",noindex"`. Omitting the leading comma (`datastore:"noindex"`)
+renames the property to "noindex" and leaves it indexed.
 
 For a nested struct field, the options may also include "flatten". This
 indicates that the immediate fields and any nested substruct fields of the
@@ -183,10 +224,13 @@ Loading a Null into a field of struct type is an error.
 
 # Pointer Fields
 
-A struct field can be a pointer to a signed integer, floating-point number, string or
-bool. Putting a non-nil pointer will store its dereferenced value. Putting a nil
-pointer will store a Datastore Null property, unless the field is marked omitempty,
-in which case no property will be stored.
+A struct field can be a pointer to a signed integer, floating-point number,
+string, bool, time.Time, GeoPoint, or []byte. Putting a non-nil pointer stores
+its dereferenced value. Putting a nil pointer of one of these types (or a nil
+*Key or nil interface{}) stores a Datastore Null property, unless the field is
+marked omitempty, in which case no property is stored. In contrast, a nil
+pointer to a struct is always omitted on save (never stored as Null), even
+without omitempty.
 
 Loading a Null into a pointer field sets the pointer to nil. Loading any other value
 allocates new storage with the value, and sets the field to point to it.
@@ -243,16 +287,20 @@ structs are themselves saved as Entity values. For example, given these definiti
 		I Inner
 	}
 
-then an Outer would have one property, Inner, encoded as an Entity value.
+then an Outer would have one property, I, encoded as an Entity value.
 
 Note: embedded struct fields must be named to be encoded as an Entity. For
-example, in case of a type Outer with an embedded field Inner:
+example, in case of a type Outer with an anonymous embedded field Inner:
 
 	type Outer struct {
 		Inner
 	}
 
-all the Inner struct fields will be treated as fields of Outer itself.
+all the exported Inner struct fields are promoted and saved as top-level
+properties of Outer itself. Warning: if an anonymously embedded struct
+implements [PropertyLoadSaver], the outer struct inherits its Load and Save
+methods and silently drops the outer struct's own fields unless the outer
+struct implements Load and Save explicitly.
 
 If an outer struct is tagged "noindex" then all of its implicit flattened
 fields are effectively "noindex".
@@ -316,9 +364,11 @@ an Outer's properties would be equivalent to those of:
 		Z          bool
 	}
 
-Note that the "flatten" option cannot be used for Entity value fields or
-PropertyLoadSaver implementers. The server will reject any dotted field names
-for an Entity value.
+The "flatten" option can be used on nested structs and [PropertyLoadSaver]
+fields (nested PropertyLoadSaver implementations must use pointer receivers).
+Flattened structs cannot produce slices of slices (except [][]byte). Avoid
+combining "omitempty" with flattened slices of structs, because omitting fields
+on only some slice elements causes save errors or misaligned parallel arrays.
 
 # The PropertyLoadSaver Interface
 
@@ -372,14 +422,13 @@ arbitrary entity's contents.
 
 # The KeyLoader Interface
 
-If a type implements the PropertyLoadSaver interface, it may
-also want to implement the KeyLoader interface.
-The KeyLoader interface exists to allow implementations of PropertyLoadSaver
-to also load an Entity's Key into the Go type. This type may be a struct
-pointer, but it does not have to be. The datastore package will call LoadKey
-// when getting the entity's contents, before calling Load. If LoadKey returns
-// an error, Load will still be called, but the error from LoadKey will be
-// returned.
+If a type implements the [PropertyLoadSaver] interface, it may also want to
+implement the [KeyLoader] interface. The KeyLoader interface allows
+implementations of PropertyLoadSaver to load an entity's [Key] into the Go
+type. This type may be a struct pointer, but it does not have to be. The
+datastore package calls LoadKey before calling Load when getting the entity's
+contents. If LoadKey returns an error, Load is still called, and the error from
+LoadKey is returned.
 
 Example code:
 
@@ -409,15 +458,17 @@ interface, see the "Key Field" section above.
 # Queries
 
 Queries retrieve entities based on their properties or key's ancestry. Running
-a query yields an iterator of results: either keys or (key, entity) pairs.
-Queries are re-usable and it is safe to call Query.Run from concurrent
-goroutines. Iterators are not safe for concurrent use.
+a query yields an [Iterator] of results: either keys or (key, entity) pairs.
+Queries are reusable, and it is safe to call [Client.Run] from concurrent
+goroutines with the same [Query]. Iterators are not safe for concurrent use.
 
-Queries are immutable, and are either created by calling NewQuery, or derived
-from an existing query by calling a method like Filter or Order that returns a
-new query value. A query is typically constructed by calling NewQuery followed
-by a chain of zero or more such methods. These methods are:
-  - Ancestor and Filter constrain the entities returned by running a query.
+Queries are immutable, and are either created by calling [NewQuery], or derived
+from an existing query by calling a method like [Query.FilterField],
+[Query.FilterEntity], or [Query.Order] that returns a new query value. A query
+is typically constructed by calling NewQuery followed by a chain of zero or
+more such methods. These methods are:
+  - Ancestor, FilterField, and FilterEntity constrain the entities returned by
+    running a query.
   - Order affects the order in which they are returned.
   - Project constrains the fields returned.
   - Distinct de-duplicates projected entities.
@@ -458,7 +509,18 @@ Example code:
 
 # Transactions
 
-Client.RunInTransaction runs a function in a transaction.
+[Client.RunInTransaction] runs a callback function in a transaction and commits
+on a nil return. By default it retries up to 3 times (configurable with
+[MaxAttempts]) on transient gRPC errors including Aborted
+([ErrConcurrentTransaction]), DeadlineExceeded, Internal, Canceled, Unknown,
+and Unauthenticated, rolling back automatically on retryable errors,
+non-retryable errors, and panics. Keep the callback idempotent and reset any
+outer variables on each attempt.
+
+Inside a transaction, perform all reads and writes via the [Transaction]
+methods or [Query.Transaction] rather than standalone [Client] methods. Writes
+are buffered locally until commit and are not visible to reads or queries in
+the same transaction.
 
 Example code:
 
@@ -489,22 +551,56 @@ Example code:
 		fmt.Printf("Count=%d\n", count)
 	}
 
-Pass the ReadOnly option to RunInTransaction if your transaction is used only for Get,
-GetMulti or queries. Read-only transactions are more efficient.
+Pass the [ReadOnly] option to [Client.RunInTransaction] if your transaction is
+used only for Get, GetMulti, or queries. Read-only transactions are more
+efficient and still retry on transient errors. Enqueued writes on a ReadOnly
+transaction fail at commit time.
+
+# Errors and Retries
+
+Datastore operations can return package sentinel errors ([ErrNoSuchEntity],
+[ErrInvalidKey], [ErrInvalidEntityType], [ErrConcurrentTransaction], and
+*[ErrFieldMismatch]), [MultiError] for batch per-entity failures, or raw gRPC
+status errors (from google.golang.org/grpc/status, such as codes.AlreadyExists
+or codes.NotFound).
+
+[MultiError] does not implement Unwrap, so errors.Is and errors.As do not match
+element errors inside a MultiError. Extract it with errors.As(err, &me) and
+inspect each me[i] directly. Whole-call RPC and context errors are returned
+directly rather than as MultiError.
+
+By default, the gRPC service config sets a 60-second RPC timeout with
+waitForReady enabled and up to 5 automatic retry attempts on UNAVAILABLE for
+all RPCs (including non-transactional writes) and on DEADLINE_EXCEEDED,
+INTERNAL, and RESOURCE_EXHAUSTED for reads (Lookup, RunQuery,
+RunAggregationQuery, and ReserveIds). Pass a shorter context deadline for
+fail-fast calls.
 
 # Google Cloud Datastore Emulator
 
-This package supports the Cloud Datastore emulator, which is useful for testing and
-development. Environment variables are used to indicate that datastore traffic should be
-directed to the emulator instead of the production Datastore service.
+This package supports the Cloud Datastore emulator, which is useful for testing
+and development. Setting the DATASTORE_EMULATOR_HOST environment variable
+directs traffic to the emulator instead of production Cloud Datastore,
+disabling authentication and using insecure gRPC credentials automatically.
 
-To install and set up the emulator and its environment variables, see the documentation
-at https://cloud.google.com/datastore/docs/tools/datastore-emulator.
+To install and set up the emulator and its environment variables, see the
+documentation at
+https://docs.cloud.google.com/datastore/docs/tools/datastore-emulator.
 
-To use the emulator with this library, you can set the DATASTORE_EMULATOR_HOST
-environment variable to the address at which your emulator is running. This will
-send requests to that address instead of to Cloud Datastore. You can then create
-and use a client as usual:
+When DATASTORE_EMULATOR_HOST is set, passing [DetectProjectID] falls back to
+"dummy-emulator-datastore-project" if credential detection fails, whereas
+passing "" without DATASTORE_PROJECT_ID still returns an error. When running
+the emulator in Docker, bind it to 0.0.0.0 rather than localhost so other
+containers can reach it. Set DATASTORE_EMULATOR_HOST to host:port (using
+bracketed syntax for IPv6 addresses, such as [::1]:8081) without an http://
+scheme.
+
+When connecting to production Cloud Datastore from minimal container images
+(such as scratch or debian-slim), install root CA certificates
+(ca-certificates) so TLS handshakes succeed.
+
+To use the emulator with this library, set DATASTORE_EMULATOR_HOST and create a
+client as usual:
 
 	// Set DATASTORE_EMULATOR_HOST environment variable.
 	err := os.Setenv("DATASTORE_EMULATOR_HOST", "localhost:9000")

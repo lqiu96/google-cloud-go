@@ -22,12 +22,14 @@ import (
 )
 
 // A Mutation represents a change to a Datastore entity.
+// Validation errors from constructors and builder methods are deferred and
+// returned in a [MultiError] when applied via [Client.Mutate] or [Transaction.Mutate].
 type Mutation struct {
 	key *Key // needed for transaction PendingKeys and to dedup deletions
 	mut *pb.Mutation
 
 	// err is set to a Datastore or gRPC error, if Mutation is not valid
-	// (see https://godoc.org/google.golang.org/grpc/codes).
+	// (see https://pkg.go.dev/google.golang.org/grpc/codes).
 	err error
 }
 
@@ -36,23 +38,20 @@ func (m *Mutation) isDelete() bool {
 	return ok
 }
 
-// WithTransforms adds one or more server-side property transformations to the mutation.
-// It can be called multiple times to add more transforms.
-// The order of transforms is preserved, first by the order of calls to WithTransforms,
-// and then by the order of transforms within a single call.
+// WithTransforms adds one or more server-side [PropertyTransform] operations to
+// the mutation. It can be called multiple times, preserving the order of calls
+// and the order of transforms within each call. Transforms cannot be applied to
+// a [NewDelete] mutation.
 //
-// Usage with NewUpsert: By default, NewUpsert replaces the entire entity.
-// To apply transforms without replacing the existing entity (e.g. only incrementing a counter),
-// call WithPropertyMask on the mutation with an empty slice.
+// Transforms are applied after the insert, upsert, or update operation, even if
+// a transformed property is excluded from [Mutation.WithPropertyMask]. By
+// default, [NewUpsert] and [NewUpdate] replace the entire entity before applying
+// transforms. To perform a transform-only update without overwriting existing
+// properties (for example, incrementing a counter), call WithPropertyMask() with
+// no paths together with WithTransforms.
 //
-// Note: Transforms are applied *after* the Upsert/Update operation.
-// The PropertyMask controls what the Upsert/Update writes (the "base" for the transform).
-//
-// Transforms are applied to this base entity even if the property was excluded from
-// the mask.
-//
-// - nil mask: Base is the new entity (full replacement).
-// - empty mask: Base is the existing entity (no-op update).
+// Any error from an invalid or uninitialized [PropertyTransform] is recorded on
+// the mutation and returned when applied via [Client.Mutate] or [Transaction.Mutate].
 func (m *Mutation) WithTransforms(transforms ...PropertyTransform) *Mutation {
 	if m.err != nil {
 		return m
@@ -77,13 +76,14 @@ func (m *Mutation) WithTransforms(transforms ...PropertyTransform) *Mutation {
 }
 
 // WithPropertyMask specifies which properties of the entity should be updated.
+// It is only valid on [NewUpdate] and [NewUpsert] mutations (calling it on
+// [NewInsert] or [NewDelete] records an error returned by [Client.Mutate] or
+// [Transaction.Mutate]).
 //
-// If paths is empty, no properties will be updated (and the entity will not be replaced).
-// This is useful when performing a "transform-only" operation where you only want to
-// apply PropertyTransforms without modifying other parts of the entity.
-//
-// If WithPropertyMask is not called, the default behavior for Upsert and Update
-// is to replace the entire entity.
+// If paths is empty, no properties are overwritten. Combine an empty
+// WithPropertyMask() call with [Mutation.WithTransforms] to apply server-side
+// transforms without overwriting existing properties. If WithPropertyMask is not
+// called, [NewUpsert] and [NewUpdate] replace the entire entity.
 func (m *Mutation) WithPropertyMask(paths ...string) *Mutation {
 	if m.err != nil {
 		return m
@@ -106,9 +106,11 @@ func (m *Mutation) WithPropertyMask(paths ...string) *Mutation {
 	return m
 }
 
-// NewInsert creates a Mutation that will save the entity src into the
-// datastore with key k. If k already exists, calling Mutate with the
-// Mutation will lead to a gRPC codes.AlreadyExists error.
+// NewInsert creates a [Mutation] that saves src under key k only if k does not
+// already exist. If k already exists, committing the mutation fails with a gRPC
+// codes.AlreadyExists error. If k is incomplete, k is not mutated (use the
+// returned key from [Client.Mutate] or [Commit.Key]). See [Client.Put] for valid
+// values of src.
 func NewInsert(k *Key, src interface{}) *Mutation {
 	if !k.valid() {
 		return &Mutation{err: ErrInvalidKey}
@@ -123,12 +125,13 @@ func NewInsert(k *Key, src interface{}) *Mutation {
 	}
 }
 
-// NewUpsert creates a Mutation that saves the entity src into the datastore with key
-// k, whether or not k exists. See Client.Put for valid values of src.
+// NewUpsert creates a [Mutation] that saves src under key k whether or not k
+// exists. If k is incomplete, k is not mutated (use the returned key from
+// [Client.Mutate] or [Commit.Key]). See [Client.Put] for valid values of src.
 //
-// By default, NewUpsert replaces the entire entity. To perform a partial update
-// or a "transform-only" operation (e.g. only incrementing a counter),
-// call WithPropertyMask on the returned Mutation.
+// By default, NewUpsert replaces the entire entity. Call [Mutation.WithPropertyMask]
+// for partial updates, or call WithPropertyMask() with no paths together with
+// [Mutation.WithTransforms] for transform-only updates.
 func NewUpsert(k *Key, src interface{}) *Mutation {
 	if !k.valid() {
 		return &Mutation{err: ErrInvalidKey}
@@ -143,10 +146,11 @@ func NewUpsert(k *Key, src interface{}) *Mutation {
 	}
 }
 
-// NewUpdate creates a Mutation that replaces the entity in the datastore with
-// key k. If k does not exist, calling Mutate with the Mutation will lead to a
-// gRPC codes.NotFound error.
-// See Client.Put for valid values of src.
+// NewUpdate creates a [Mutation] that replaces the existing entity with complete
+// key k. If k does not exist, committing the mutation fails with a gRPC
+// codes.NotFound error (not [ErrNoSuchEntity]). Call [Mutation.WithPropertyMask]
+// for partial updates or transform-only updates. See [Client.Put] for valid
+// values of src.
 func NewUpdate(k *Key, src interface{}) *Mutation {
 	if !k.valid() {
 		return &Mutation{err: ErrInvalidKey}
@@ -164,7 +168,8 @@ func NewUpdate(k *Key, src interface{}) *Mutation {
 	}
 }
 
-// NewDelete creates a Mutation that deletes the entity with key k.
+// NewDelete creates a [Mutation] that deletes the entity with complete key k.
+// Deleting a nonexistent key succeeds without error.
 func NewDelete(k *Key) *Mutation {
 	if !k.valid() {
 		return &Mutation{err: ErrInvalidKey}
