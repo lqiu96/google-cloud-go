@@ -58,7 +58,7 @@ type DatasetMetadata struct {
 	// collation, which is applied to the string fields that do not have explicit
 	// collation specified. A change to this field affects only tables created
 	// afterwards, and does not alter the existing tables.
-	// More information: https://cloud.google.com/bigquery/docs/reference/standard-sql/collation-concepts
+	// More information: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/collation-concepts
 	DefaultCollation string
 
 	// For externally defined datasets, contains information about the configuration.
@@ -71,7 +71,8 @@ type DatasetMetadata struct {
 	// Storage billing model to be used for all tables in the dataset.
 	// Can be set to PHYSICAL. Default is LOGICAL, which may be returned as ""
 	// ([LogicalStorageBillingModel]) when unspecified by the server.
-	// Once you create a dataset with storage billing model set to physical bytes, you can't change it back to using logical bytes again.
+	// Changing a dataset's storage billing model takes 24 hours to take effect,
+	// and you must wait 14 days before changing it again.
 	// More details: https://docs.cloud.google.com/bigquery/docs/datasets-intro#dataset_storage_billing_models
 	StorageBillingModel string
 
@@ -82,7 +83,7 @@ type DatasetMetadata struct {
 
 	// The tags associated with this dataset. Tag keys are
 	// globally unique, and managed via the resource manager API.
-	// More information: https://cloud.google.com/resource-manager/docs/tags/tags-overview
+	// More information: https://docs.cloud.google.com/resource-manager/docs/tags/tags-overview
 	Tags []*DatasetTag
 
 	// IsCaseInsensitive can be set when creating or updating a dataset.
@@ -167,7 +168,8 @@ type DatasetMetadataToUpdate struct {
 
 	// Storage billing model to be used for all tables in the dataset.
 	// Can be set to PHYSICAL. Default is LOGICAL.
-	// Once you change a dataset's storage billing model to use physical bytes, you can't change it back to using logical bytes again.
+	// Changing a dataset's storage billing model takes 24 hours to take effect,
+	// and you must wait 14 days before changing it again.
 	// More details: https://docs.cloud.google.com/bigquery/docs/datasets-intro#dataset_storage_billing_models
 	StorageBillingModel optional.String
 

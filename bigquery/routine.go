@@ -114,10 +114,10 @@ func (r *Routine) Metadata(ctx context.Context) (rm *RoutineMetadata, err error)
 
 // Update replaces the routine's metadata using HTTP PUT (routines.update).
 // Unlike [Table.Update], [Dataset.Update], and [Model.Update] (which patch
-// individual fields), Update requires a non-nil *[RoutineMetadataToUpdate] and
-// performs a full resource replacement. Populate all fields you want to preserve
-// (including Type, Language, Body, Arguments, and ReturnType), as omitted fields
-// are cleared or rejected. Pass etag from a prior [Routine.Metadata] call for
+// individual fields), Update panics if upd is nil and performs a full resource
+// replacement. Populate all fields you want to preserve (including Type,
+// Language, Body, Arguments, and ReturnType), as omitted fields may be
+// cleared, defaulted, or rejected. Pass etag from a prior [Routine.Metadata] call for
 // optimistic concurrency control (If-Match, failing with HTTP 412 on concurrent
 // writes), or pass "" for a blind write.
 func (r *Routine) Update(ctx context.Context, upd *RoutineMetadataToUpdate, etag string) (rm *RoutineMetadata, err error) {
@@ -222,7 +222,7 @@ type RoutineMetadata struct {
 
 	// For data governance use cases.  If set to "DATA_MASKING", the function
 	// is validated and made available as a masking function. For more information,
-	// see: https://cloud.google.com/bigquery/docs/user-defined-functions#custom-mask
+	// see: https://docs.cloud.google.com/bigquery/docs/user-defined-functions#custom-mask
 	DataGovernanceType string
 }
 
@@ -415,8 +415,8 @@ func routineArgumentsToBQ(in []*RoutineArgument) ([]*bq.Argument, error) {
 // RoutineMetadataToUpdate specifies the routine definition passed to [Routine.Update].
 //
 // Because [Routine.Update] performs a full-replacement HTTP PUT, populate all fields
-// you want to preserve. Omitted fields are cleared or rejected, and remote function
-// options on existing remote routines are not preserved. Fields typed as
+// you want to preserve. Omitted fields may be cleared, defaulted, or rejected, and
+// remote function options on existing remote routines are not preserved. Fields typed as
 // optional.String accept plain string values (not *string) and panic at runtime if
 // given another type. DeterminismLevel accepts either string or [RoutineDeterminism].
 type RoutineMetadataToUpdate struct {

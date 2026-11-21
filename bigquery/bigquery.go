@@ -62,18 +62,25 @@ func setClientHeader(headers http.Header) {
 // ([Query], [Loader], [Extractor], [Copier], and [Inserter] option fields) are
 // not safe for concurrent use. Call [Client.Close] when finished.
 //
-// Most RPCs automatically retry transient transport, HTTP 5xx, and selected
-// structured BigQuery error reasons using hardcoded exponential backoff until
-// the context expires. Always pass a context with a deadline. Unstructured HTTP
-// 429 responses, quotaExceeded errors, [ReaderSource] loads, and
-// [Dataset.Create], [Routine.Create], [Model.Delete], and [Routine.Delete] are
-// not retried automatically.
+// Most RPCs automatically retry transient transport, HTTP 5xx (500, 502, 503,
+// and 504), and selected structured BigQuery error reasons using hardcoded
+// exponential backoff until the context expires. Always pass a context with a
+// deadline. Unstructured HTTP 429 responses, quotaExceeded errors,
+// [ReaderSource] loads, and [Dataset.Create], [Routine.Create], [Model.Delete],
+// and [Routine.Delete] are not retried automatically.
 type Client struct {
 	// Location, if set, is used as the default location for subsequent dataset
-	// creation, job submission, and [Client.JobFromID] lookups. A location
-	// specified directly on an operation ([JobIDConfig.Location],
+	// creation, job submission ([Query.Run], [Loader.Run], [Extractor.Run],
+	// [Copier.Run]), and [Client.JobFromID] lookups. A location specified
+	// directly on an operation ([JobIDConfig.Location],
 	// [DatasetMetadata.Location], or [Client.JobFromIDLocation]) overrides this
 	// value.
+	//
+	// Note that the [Query.Read] fast path (jobs.query) sends only
+	// Query.Location ([JobIDConfig.Location]) and does not inherit
+	// Client.Location. Set Query.Location directly when calling [Query.Read] in
+	// a specific region, especially for queries or scripts that do not reference
+	// a dataset.
 	//
 	// Set Location during client initialization before sharing the client across
 	// goroutines. Single-region jobs outside the US and EU multi-regions require
@@ -163,9 +170,11 @@ func NewClient(ctx context.Context, projectID string, opts ...option.ClientOptio
 // [option.ClientOption] values (such as credentials, endpoints, or quota
 // project) passed to [NewClient]. Pass them again here if needed.
 //
-// If read session setup fails (for example on views, external tables, or
-// missing permissions), reads silently fall back to the REST API. Single-page
-// [Query.Read] fast-path results also stay on REST. Check
+// If read session setup fails (for example due to missing
+// bigquery.readsessions.create permission or an unsupported source), reads
+// silently fall back to the REST API. Note that [Table.Read] also fails on REST
+// for views and external tables (query them with [Client.Query] instead).
+// Single-page [Query.Read] fast-path results also stay on REST. Check
 // [RowIterator.IsAccelerated] to confirm acceleration is active.
 //
 // When accelerated, [RowIterator.StartIndex] and [RowIterator.PageInfo]

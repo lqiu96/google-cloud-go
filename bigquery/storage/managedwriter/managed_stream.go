@@ -74,8 +74,8 @@ func streamTypeToEnum(t StreamType) storagepb.WriteStream_Type {
 // multiple goroutines (sends are synchronized on the underlying connection, though
 // callers supplying explicit offsets via [WithOffset] must coordinate ordering).
 // Automatic write retries are disabled by default. Configure [EnableWriteRetries]
-// with true to recover from idle disconnects (roughly 10 minutes) and transient
-// errors. Call [ManagedStream.Close] when finished.
+// with true to recover from idle disconnects and transient errors. Call
+// [ManagedStream.Close] when finished.
 type ManagedStream struct {
 	// Unique id for the managedstream instance.
 	id string
@@ -297,7 +297,7 @@ func (ms *ManagedStream) buildRequest(data [][]byte) *storagepb.AppendRowsReques
 // with the schema set for the stream. Use [WithOffset] to set an explicit offset
 // for user-created streams. Setting an offset on a [DefaultStream] is unsupported.
 //
-// A single request (serialized rows plus request overhead) must be under 10 MB.
+// A single request (serialized rows plus request overhead) must be under 20 MB.
 // Larger requests fail with INVALID_ARGUMENT.
 func (ms *ManagedStream) AppendRows(ctx context.Context, data [][]byte, opts ...AppendOption) (*AppendResult, error) {
 	// before we do anything, ensure the writer isn't closed.

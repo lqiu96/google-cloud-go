@@ -141,11 +141,11 @@ func (*QueryConfig) isJobConfig()   {}
 
 // Config returns the configuration information for j.
 //
-// On a [Job] returned by [Query.Run], Config retains the pre-execution
-// configuration captured at submission and is not refreshed by [Job.Status] or
-// [Job.Wait]. To inspect server-assigned fields such as a temporary destination
-// table ([QueryConfig.Dst]), fetch a fresh job via [Client.JobFromID] or
-// [Client.JobFromIDLocation] after execution.
+// Config returns the configuration snapshot captured when the [Job] was created
+// or fetched and is not refreshed by [Job.Status] or [Job.Wait]. On a minimal
+// [Job] returned by [RowIterator.SourceJob], Config returns (nil, nil). Fetch a
+// fresh job via [Client.JobFromID] or [Client.JobFromIDLocation] to inspect the
+// full configuration.
 func (j *Job) Config() (JobConfig, error) {
 	return bqToJobConfig(j.config, j.c)
 }
@@ -184,10 +184,14 @@ type JobIDConfig struct {
 	// If AddJobIDSuffix is true, then a random string will be appended to JobID.
 	AddJobIDSuffix bool
 
-	// Location is the location for the job. If empty, it inherits
-	// [Client.Location]. Set a matching location for single-region datasets
-	// outside the US and EU multi-regions, and for multi-statement SQL scripts
-	// whose initial statements do not reference a dataset.
+	// Location is the location for the job. For job submission ([Query.Run],
+	// [Loader.Run], [Extractor.Run], [Copier.Run]), an empty Location inherits
+	// [Client.Location]. On the [Query.Read] fast path (jobs.query),
+	// [Client.Location] is not inherited, so set Location directly on the
+	// [Query] when targeting a specific region. Set a matching location for
+	// single-region datasets outside the US and EU multi-regions, and for
+	// multi-statement SQL scripts whose initial statements do not reference a
+	// dataset.
 	Location string
 
 	// ProjectID is the Google Cloud project associated with the job.
@@ -310,17 +314,19 @@ func (j *Job) Delete(ctx context.Context) (err error) {
 //
 // Error semantics differ by job type. For load, copy, and extract jobs, Wait
 // polls [Job.Status] and returns (status, nil) even when the job fails in
-// BigQuery, so inspect status.Err() (and status.Errors for load diagnostics).
-// For query jobs, Wait polls jobs.getQueryResults, so query execution failures
-// are typically returned directly as (nil, err) without updating
+// BigQuery, so inspect status.Err() (which is *[Error], plus status.Errors for
+// load diagnostics). For query jobs, Wait polls jobs.getQueryResults, so query
+// execution failures are typically returned directly as (nil, err) where err is
+// *[google.golang.org/api/googleapi.Error] (not *[Error]) without updating
 // [Job.LastStatus]. Always check both err and status.Err().
 //
 // Failed jobs are terminal and cannot be retried by polling or reusing the same
-// job ID. To recover from transient job failures (such as jobRateLimitExceeded,
-// jobBackendError, or jobInternalError), submit a new job with a new job ID.
-// Wait fails on dry-run query jobs (inspect [Job.LastStatus] after [Query.Run]
-// instead). For reading query results, call [Job.Read] directly, which waits
-// for completion without an extra [Job.Status] RPC.
+// job ID. To recover from transient job failures (such as jobRateLimitExceeded
+// or other temporary reasons documented in the errors reference below), submit
+// a new job with a new job ID. Wait fails on dry-run query jobs (inspect
+// [Job.LastStatus] after [Query.Run] instead). For reading query results, call
+// [Job.Read] directly, which waits for completion without an extra [Job.Status]
+// RPC.
 //
 // See https://docs.cloud.google.com/bigquery/docs/managing-jobs#repeat_jobs and
 // https://docs.cloud.google.com/bigquery/docs/errors.
@@ -362,9 +368,10 @@ func (j *Job) Wait(ctx context.Context) (js *JobStatus, err error) {
 // [Job.Wait] first to avoid an extra [Job.Status] RPC.
 //
 // Read returns an error if j is not a query job or is a dry-run query job. If
-// the job fails with a transient job error (such as jobRateLimitExceeded,
-// jobBackendError, or jobInternalError), submit a new query job with a new job
-// ID rather than retrying Read on the failed job.
+// the job fails with a transient job error (such as jobRateLimitExceeded or
+// other temporary reasons listed at
+// https://docs.cloud.google.com/bigquery/docs/errors), submit a new query job
+// with a new job ID rather than retrying Read on the failed job.
 func (j *Job) Read(ctx context.Context) (ri *RowIterator, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/bigquery.Job.Read")
 	defer func() { trace.EndSpan(ctx, err) }()

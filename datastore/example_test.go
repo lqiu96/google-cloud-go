@@ -298,9 +298,10 @@ func ExampleClient_NewTransaction() {
 	const retries = 3
 
 	// Increment a counter.
-	// For high-contention counters, use distributed counters
-	// (https://docs.cloud.google.com/firestore/native/docs/solutions/counters)
-	// or a server-side datastore.Increment property transform.
+	// For simpler atomic increments without a transaction, use a server-side
+	// datastore.Increment property transform. For high-contention counters, use
+	// distributed counters
+	// (https://docs.cloud.google.com/firestore/native/docs/solutions/counters).
 	type Counter struct {
 		Count int
 	}
@@ -349,9 +350,10 @@ func ExampleClient_RunInTransaction() {
 	defer client.Close()
 
 	// Increment a counter.
-	// For high-contention counters, use distributed counters
-	// (https://docs.cloud.google.com/firestore/native/docs/solutions/counters)
-	// or a server-side datastore.Increment property transform.
+	// For simpler atomic increments without a transaction, use a server-side
+	// datastore.Increment property transform. For high-contention counters, use
+	// distributed counters
+	// (https://docs.cloud.google.com/firestore/native/docs/solutions/counters).
 	type Counter struct {
 		Count int
 	}

@@ -133,8 +133,7 @@ func (c *Client) Close() error {
 // retained for the lifetime of the stream, and canceling or expiring it permanently
 // closes the stream so all subsequent [ManagedStream.AppendRows] calls fail.
 // Pass [EnableWriteRetries] with true to automatically recover from idle
-// disconnects (after roughly 10 minutes) and transient errors. Call
-// [ManagedStream.Close] when finished.
+// disconnects and transient errors. Call [ManagedStream.Close] when finished.
 func (c *Client) NewManagedStream(ctx context.Context, opts ...WriterOption) (*ManagedStream, error) {
 	return c.buildManagedStream(ctx, c.rawClient.AppendRows, false, opts...)
 }

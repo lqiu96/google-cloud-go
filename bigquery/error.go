@@ -32,10 +32,9 @@ import (
 // target (var bqErr *bigquery.Error).
 //
 // Inspect Reason (not only the HTTP status code) to distinguish transient
-// failures (such as rateLimitExceeded, backendError, internalError,
-// jobRateLimitExceeded, jobBackendError, and jobInternalError) from permanent
-// errors. See https://docs.cloud.google.com/bigquery/docs/errors for API HTTP
-// status and error reason codes, and
+// failures (such as rateLimitExceeded or backendError) from permanent errors.
+// See https://docs.cloud.google.com/bigquery/docs/errors for the full list of
+// API HTTP status and error reason codes, and
 // https://docs.cloud.google.com/bigquery/docs/error-messages for client and
 // connectivity errors.
 type Error struct {

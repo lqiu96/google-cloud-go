@@ -111,7 +111,7 @@ type LoadConfig struct {
 
 	// Controls the behavior of column naming during a load job.
 	// For more information, see:
-	// https://cloud.google.com/bigquery/docs/reference/rest/v2/Job#columnnamecharactermap
+	// https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/Job#columnnamecharactermap
 	ColumnNameCharacterMap ColumnNameCharacterMap
 
 	// The reservation that job would use. User can specify a reservation to

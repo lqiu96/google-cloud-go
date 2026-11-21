@@ -48,10 +48,9 @@ Details about data type conversions between BigQuery and protocol buffers can be
 found in the public documentation:
 https://docs.cloud.google.com/bigquery/docs/supported-data-types#supported_protocol_buffer_data_types
 
-Note that well-known types such as google.protobuf.Timestamp are not supported
-directly for BigQuery TIMESTAMP columns. Encode BigQuery TIMESTAMP fields as
-int64 epoch microseconds (or RFC 3339 strings) as described in the supported
-data types documentation above.
+For BigQuery TIMESTAMP columns, int64 epoch microseconds is the preferred
+protocol buffer representation (see the supported data types documentation
+above).
 
 For cases where the protocol buffer is compiled from a static ".proto" definition,
 this process is straightforward.  Instantiate an example message, then convert the
@@ -60,10 +59,11 @@ descriptor into a descriptor proto:
 	m := &myprotopackage.MyCompiledMessage{}
 	descriptorProto := protodesc.ToDescriptorProto(m.ProtoReflect().Descriptor())
 
-If the message uses nested messages, groups, or enums, you must normalize the
-descriptor into a self-contained definition using adapt.NormalizeDescriptor from
-the cloud.google.com/go/bigquery/storage/managedwriter/adapt subpackage rather
-than protodesc.ToDescriptorProto alone:
+If the message uses nested messages, groups, enums, or well-known types such as
+google.protobuf.Timestamp, you must normalize the descriptor into a
+self-contained definition using adapt.NormalizeDescriptor from the
+cloud.google.com/go/bigquery/storage/managedwriter/adapt subpackage rather than
+protodesc.ToDescriptorProto alone:
 
 	m := &myprotopackage.MyCompiledMessage{}
 	descriptorProto, err := adapt.NormalizeDescriptor(m.ProtoReflect().Descriptor())
@@ -118,7 +118,7 @@ Use the AppendRows function to write one or more serialized proto messages to a 
 can choose to specify an offset in the stream to handle de-duplication for user-created streams,
 but a "default" stream neither accepts nor reports offsets.
 
-Each AppendRows request (serialized rows plus request overhead) must be under 10 MB,
+Each AppendRows request (serialized rows plus request overhead) must be under 20 MB,
 or the service rejects it with INVALID_ARGUMENT. Batch rows accordingly.
 
 AppendRows returns a future-like object that blocks until the write is successful or yields
@@ -219,8 +219,8 @@ An example of accessing the structured error details:
 	}
 
 This library supports retrying failed append requests, but retries are disabled
-by default (opt-in). The BigQuery Storage Write API closes idle connections after
-roughly 10 minutes and drains connections periodically. Without retries enabled,
+by default (opt-in). The BigQuery Storage Write API closes connections after an
+idle period and drains connections periodically. Without retries enabled,
 writes over an idle or draining connection fail with io.EOF, Unavailable, or
 context deadline exceeded. Enable retries by passing true to [EnableWriteRetries]
 when constructing a [ManagedStream]. Automatic retries are generally recommended
@@ -231,7 +231,7 @@ With write retries enabled, failed writes are automatically attempted a finite
 number of times if the failure is considered retriable.
 
 In support of the retry changes, the AppendResult returned as part of an append call now includes
-TotalAttempts(), which returns the number of times that specific append was enqueued to the service.
+TotalAttempts(ctx), which returns the number of times that specific append was enqueued to the service.
 Values larger than 1 are indicative of a specific append being enqueued multiple times.
 
 # Usage of Contexts

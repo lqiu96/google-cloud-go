@@ -155,7 +155,7 @@ type TableMetadata struct {
 	// The following values are supported:
 	//   - 'und:ci': undetermined locale, case insensitive.
 	//   - '': empty string. Default to case-sensitive behavior.
-	// More information: https://cloud.google.com/bigquery/docs/reference/standard-sql/collation-concepts
+	// More information: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/collation-concepts
 	DefaultCollation string
 
 	// TableConstraints contains table primary and foreign keys constraints.
@@ -168,7 +168,7 @@ type TableMetadata struct {
 
 	// The tags associated with this table. Tag
 	// keys are globally unique. See additional information on tags
-	// (https://cloud.google.com/iam/docs/tags-access-control#definitions).
+	// (https://docs.cloud.google.com/iam/docs/tags-access-control#definitions).
 	// An object containing a list of "key": value pairs. The key is the
 	// namespaced friendly name of the tag key, e.g. "12345/environment"
 	// where 12345 is parent id. The value is the friendly short name of the
@@ -318,7 +318,7 @@ const (
 	// RegularTable is a regular table.
 	RegularTable TableType = "TABLE"
 	// ViewTable is a table type describing that the table is a logical view.
-	// See more information at https://cloud.google.com/bigquery/docs/views.
+	// See more information at https://docs.cloud.google.com/bigquery/docs/views.
 	ViewTable TableType = "VIEW"
 	// ExternalTable is a table type describing that the table is an external
 	// table (also known as a federated data source). See more information at
@@ -553,7 +553,7 @@ const (
 )
 
 // TimePartitioning describes the time-based date partitioning on a table.
-// For more information see: https://cloud.google.com/bigquery/docs/creating-partitioned-tables.
+// For more information see: https://docs.cloud.google.com/bigquery/docs/creating-partitioned-tables.
 type TimePartitioning struct {
 	// Defines the partition interval type.  Supported values are "HOUR", "DAY", "MONTH", and "YEAR".
 	// When the interval type is not specified, default behavior is DAY.
@@ -669,7 +669,7 @@ func (rpr *RangePartitioningRange) toBQ() *bq.RangePartitioningRange {
 }
 
 // Clustering governs the organization of data within a managed table.
-// For more information, see https://cloud.google.com/bigquery/docs/clustered-tables
+// For more information, see https://docs.cloud.google.com/bigquery/docs/clustered-tables
 type Clustering struct {
 	Fields []string
 }
@@ -1319,11 +1319,13 @@ type TableMetadataToUpdate struct {
 	MaterializedView *MaterializedViewDefinition
 
 	// TimePartitioning allows modification of mutable partition settings such as
-	// partition expiration and whether partition filtering is required at query time.
-	// Updates replace the mutable partitioning fields, so populate every mutable
-	// field you want to preserve. An Expiration of 0 clears partition expiration,
-	// and RequirePartitionFilter is always sent. Prefer the top-level
-	// RequirePartitionFilter field to toggle partition filtering alone.
+	// partition expiration. Updates replace the mutable partitioning fields, so
+	// populate every mutable field you want to preserve. An Expiration of 0 clears
+	// partition expiration. The nested TimePartitioning.RequirePartitionFilter
+	// field is deprecated (though sent unconditionally, BigQuery's top-level
+	// RequirePartitionFilter takes precedence). Use the top-level
+	// TableMetadataToUpdate.RequirePartitionFilter field to set or clear partition
+	// filter enforcement.
 	TimePartitioning *TimePartitioning
 
 	// RequirePartitionFilter governs whether the table enforces partition
@@ -1344,7 +1346,7 @@ type TableMetadataToUpdate struct {
 
 	// The tags associated with this table. Tag
 	// keys are globally unique. See additional information on tags
-	// (https://cloud.google.com/iam/docs/tags-access-control#definitions).
+	// (https://docs.cloud.google.com/iam/docs/tags-access-control#definitions).
 	// An object containing a list of "key": value pairs. The key is the
 	// namespaced friendly name of the tag key, e.g. "12345/environment"
 	// where 12345 is parent id. The value is the friendly short name of the

@@ -211,7 +211,7 @@ change names, ignore fields, or mark a field as nullable (non-required). Fields
 declared as one of the Null types ([NullInt64], [NullFloat64], [NullString], [NullBool],
 [NullTimestamp], [NullDate], [NullTime], [NullDateTime], [NullGeography], and [NullJSON]) are
 automatically inferred as nullable, so the "nullable" tag is only needed for []byte,
-*big.Rat and pointer-to-struct fields.
+*big.Rat, *[IntervalValue], *[RangeValue], and pointer-to-struct fields.
 
 	type student2 struct {
 	    Name     string `bigquery:"full_name"`
@@ -255,6 +255,9 @@ You can wait for your job to complete with the [Job.Wait] method:
 
 	status, err := job.Wait(ctx)
 	if err != nil {
+	    // TODO: Handle error.
+	}
+	if err := status.Err(); err != nil {
 	    // TODO: Handle error.
 	}
 
@@ -411,9 +414,11 @@ request limits.
 Most RPCs automatically retry transient network and transport errors, HTTP 5xx
 responses (500, 502, 503, and 504), and selected structured BigQuery error
 reasons (such as backendError and rateLimitExceeded, plus jobRateLimitExceeded
-and internalError when enqueuing jobs) using hardcoded exponential backoff until
-the context is canceled or expires. Always pass a context with a deadline or
-timeout, because retries have no fixed maximum attempt limit.
+and internalError when enqueuing jobs or polling query results via [Job.Wait]
+and [Job.Read]) using hardcoded exponential backoff until the context is
+canceled or expires. Polling retries do not rerun a failed job. Always pass a
+context with a deadline or timeout, because retries have no fixed maximum
+attempt limit.
 
 Automatic retries do not apply to unstructured HTTP 429 responses (without a
 structured rateLimitExceeded reason), quotaExceeded errors, loads from a

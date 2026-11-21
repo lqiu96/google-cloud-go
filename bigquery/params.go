@@ -123,7 +123,7 @@ type QueryParameter struct {
 	//   - bool: BOOL
 	//   - string: STRING
 	//   - []byte: BYTES
-	//   - time.Time: TIMESTAMP (microsecond precision)
+	//   - time.Time: TIMESTAMP (truncated to microsecond precision)
 	//   - [cloud.google.com/go/civil.Date]: DATE
 	//   - [cloud.google.com/go/civil.Time]: TIME (rounded to microsecond precision)
 	//   - [cloud.google.com/go/civil.DateTime]: DATETIME (rounded to microsecond precision)
@@ -138,14 +138,19 @@ type QueryParameter struct {
 	// rejected. To send a typed SQL NULL, supply one of the Null* types
 	// ([NullInt64], [NullString], [NullFloat64], [NullBool], [NullTimestamp],
 	// [NullDate], [NullTime], [NullDateTime], [NullGeography], [NullJSON]) with
-	// Valid set to false, or an explicit *[QueryParameterValue]. Convert defined
+	// Valid set to false. For types without a dedicated Null* wrapper (such as
+	// BIGNUMERIC), pass *[QueryParameterValue] with Type set and Value set to an
+	// invalid Null* value (for example NullString{Valid: false}). Passing
+	// *[QueryParameterValue] with a nil Value returns an error. Convert defined
 	// types (such as protobuf enum integers implementing fmt.Stringer, defined
-	// []byte slices, or defined wrappers around time.Time or civil types) to
-	// their underlying built-in Go types before passing them as parameters.
+	// []byte slices, which panic at runtime, or defined wrappers around time.Time
+	// or civil types) to their underlying built-in Go types before passing them
+	// as parameters.
 	//
 	// Note that empty or nil Go slices currently serialize with arrayValues
 	// omitted (treated as NULL by BigQuery rather than an empty array), and an
-	// empty []byte{} omits value on the wire.
+	// empty []byte{} omits value on the wire and is treated as NULL by BigQuery
+	// (unlike "", which sends an empty string).
 	//
 	// *[math/big.Rat] always infers NUMERIC (9 fractional digits). To specify
 	// query parameters explicitly rather than by inference (such as BIGNUMERIC
@@ -165,8 +170,7 @@ type QueryParameter struct {
 	//   - Structs are of type map[string]interface{}.
 	//
 	// When valid (non-null) Null types are sent, they come back as the Go types
-	// indicated above. Null strings report in query statistics as a valid empty
-	// string.
+	// indicated above.
 	Value any
 }
 

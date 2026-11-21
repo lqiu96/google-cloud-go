@@ -100,10 +100,11 @@ type EntityFilter interface {
 // "!=", "in", or "not-in". For "in" and "not-in", Value must be []interface{}
 // (not a typed slice such as []string or []int).
 //
-// Value must be a supported built-in primitive (int, int32, int64, float32,
-// float64, bool, string, or []byte), [*Key], time.Time, [GeoPoint], or nil.
-// Custom defined primitive types (such as "type Status string") and unsupported
-// integer widths (such as int8, int16, or unsigned integers) are rejected.
+// Scalar values (and elements of []interface{} for "in" and "not-in") must be
+// a supported built-in primitive (int, int32, int64, float32, float64, bool,
+// string, or []byte), [*Key], time.Time, [GeoPoint], or nil. Custom defined
+// primitive types (such as "type Status string") and unsupported integer
+// widths (int8, int16, and unsigned integers) are rejected.
 //
 // Field names containing spaces, quote marks, or operator characters should be
 // passed as quoted Go string literals as returned by strconv.Quote or fmt's %q
@@ -246,8 +247,9 @@ func (af AndFilter) toValidFilter() (EntityFilter, error) {
 // values.
 //
 // A [Query] is immutable. Every builder method returns a new *Query, so callers
-// must capture the returned value. Builder validation errors are deferred and
-// returned when the query is executed.
+// must capture the returned value. Most builder validation errors are deferred
+// and returned when the query is executed (passing a nil filter to
+// [Query.FilterEntity] panics).
 func NewQuery(kind string) *Query {
 	return &Query{
 		kind:  kind,
@@ -260,8 +262,8 @@ func NewQuery(kind string) *Query {
 // Queries are immutable and safe for concurrent reuse across [Client.Run] and
 // [Client.GetAll] calls. Every builder method returns a new derivative *Query
 // and leaves the receiver unchanged, so callers must capture the return value.
-// Invalid arguments to builder methods are deferred and surfaced when the query
-// is executed.
+// Most invalid arguments to builder methods are deferred and surfaced when the
+// query is executed (passing a nil filter to [Query.FilterEntity] panics).
 type Query struct {
 	kind       string
 	ancestor   *Key
@@ -349,8 +351,8 @@ func (q *Query) Transaction(t *Transaction) *Query {
 //
 // The filter may be a single [PropertyFilter] or a composite [AndFilter] or
 // [OrFilter]. Prefer FilterEntity or [Query.FilterField] over the deprecated
-// [Query.Filter] method. Multiple calls are combined with AND. The filter and
-// any nested composite elements must be non-nil.
+// [Query.Filter] method. Multiple calls are combined with AND. Passing a nil
+// filter or a nil element inside [AndFilter] or [OrFilter] panics.
 func (q *Query) FilterEntity(ef EntityFilter) *Query {
 	q = q.clone()
 	vf, err := ef.toValidFilter()
@@ -400,9 +402,11 @@ func (q *Query) Filter(filterStr string, value interface{}) *Query {
 //
 //	q = q.FilterField("Month", "in", []interface{}{1, 2, 3, 4})
 //
-// Value must be a supported built-in primitive, [*Key], time.Time, [GeoPoint],
-// or nil. Custom defined primitive types (such as "type Status string") are
-// rejected.
+// Scalar values (and elements of []interface{} for "in" and "not-in") must be
+// a supported built-in primitive (int, int32, int64, float32, float64, bool,
+// string, or []byte), [*Key], time.Time, [GeoPoint], or nil. Custom defined
+// primitive types (such as "type Status string") and unsupported integer
+// widths (int8, int16, and unsigned integers) are rejected.
 func (q *Query) FilterField(fieldName, operator string, value interface{}) *Query {
 	return q.FilterEntity(PropertyFilter{
 		FieldName: fieldName,
@@ -684,11 +688,13 @@ type RunOption interface {
 // ExplainOptions configures query explain metrics for [Client.RunWithOptions],
 // [Client.GetAllWithOptions], and [Client.RunAggregationQueryWithOptions].
 //
-// With [Client.RunWithOptions], [Iterator.ExplainMetrics] is nil until the
-// iterator is drained to [iterator.Done]. When Analyze is false, call
-// [Iterator.Next] with a nil dst once (which returns [iterator.Done]) to
-// populate PlanSummary. When Analyze is true, iterate until [iterator.Done] to
-// populate both PlanSummary and ExecutionStats.
+// With [Client.RunWithOptions], [Iterator.ExplainMetrics] is nil before the
+// first [Iterator.Next] call and is guaranteed to be populated once the
+// iterator is drained to [iterator.Done] (it may be populated earlier once
+// the final batch is fetched). When Analyze is false, call [Iterator.Next]
+// with a nil dst once (which returns [iterator.Done]) to populate PlanSummary.
+// When Analyze is true, iterate until [iterator.Done] to ensure both
+// PlanSummary and ExecutionStats are populated.
 //
 // With [Client.GetAllWithOptions], a valid non-nil pointer-to-slice dst is
 // still required for non-keys-only queries even when Analyze is false.
@@ -889,7 +895,8 @@ func (c *Client) Run(ctx context.Context, q *Query) (it *Iterator) {
 // [RunOption] values (such as [ExplainOptions]).
 //
 // RunWithOptions is lazy. When [ExplainOptions] is provided,
-// [Iterator.ExplainMetrics] remains nil until the iterator is drained to
+// [Iterator.ExplainMetrics] is nil before the first [Iterator.Next] call and
+// is guaranteed to be populated once the iterator is drained to
 // [iterator.Done] (call [Iterator.Next] with nil once when Analyze is false).
 func (c *Client) RunWithOptions(ctx context.Context, q *Query, opts ...RunOption) (it *Iterator) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/datastore.Query.RunWithOptions")
@@ -1118,9 +1125,10 @@ type Iterator struct {
 	entityCursor []byte
 
 	// ExplainMetrics holds query explain metrics when [ExplainOptions] is
-	// passed to [Client.RunWithOptions]. It is populated only after the
-	// iterator has been drained to [iterator.Done] (call [Iterator.Next] with
-	// nil once when Analyze is false).
+	// passed to [Client.RunWithOptions]. It is nil before the first
+	// [Iterator.Next] call and is guaranteed to be populated once the iterator
+	// has been drained to [iterator.Done] (call [Iterator.Next] with nil once
+	// when Analyze is false).
 	ExplainMetrics *ExplainMetrics
 
 	// trans records the transaction in which the query was run
@@ -1137,7 +1145,7 @@ type Iterator struct {
 // If the query is not keys-only and dst is non-nil, Next loads the entity into
 // the struct pointer or [PropertyLoadSaver] dst with the same semantics as
 // [Client.Get]. Passing a nil dst skips entity unmarshaling even for
-// non-keys-only queries. If loading returns [*ErrFieldMismatch], matching
+// non-keys-only queries. If loading returns *[ErrFieldMismatch], matching
 // fields are still populated, the entity's key is returned, and the iterator
 // advances normally so subsequent Next calls continue iterating.
 func (t *Iterator) Next(dst interface{}) (k *Key, err error) {
@@ -1320,10 +1328,11 @@ func fromPbExecutionStats(pbstats *pb.ExecutionStats) *ExecutionStats {
 // Cursor returns a [Cursor] for the iterator's current position.
 //
 // After [Iterator.Next] returns an entity, Cursor points immediately after that
-// entity so [Query.Start] resumes with the next result. Cursor may also be
-// called after [Iterator.Next] returns [iterator.Done] to obtain the end cursor
-// of the final page. On a query with a positive [Query.Offset], calling Cursor
-// before Next issues RPCs to skip the offset first.
+// entity so [Query.Start] resumes with the next result. After iterating at
+// least one result, Cursor may also be called after [Iterator.Next] returns
+// [iterator.Done] to obtain the end cursor of the final page. On a query with
+// a positive [Query.Offset], calling Cursor before Next issues RPCs to skip
+// the offset first.
 func (t *Iterator) Cursor() (c Cursor, err error) {
 	ctx := trace.StartSpan(t.ctx, "cloud.google.com/go/datastore.Query.Cursor")
 	defer func() { trace.EndSpan(ctx, err) }()

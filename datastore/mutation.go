@@ -50,8 +50,10 @@ func (m *Mutation) isDelete() bool {
 // properties (for example, incrementing a counter), call WithPropertyMask() with
 // no paths together with WithTransforms.
 //
-// Any error from an invalid or uninitialized [PropertyTransform] is recorded on
-// the mutation and returned when applied via [Client.Mutate] or [Transaction.Mutate].
+// Any invalid or uninitialized [PropertyTransform] is recorded on the mutation
+// (reporting an uninitialized-transform error, whereas [Client.PutWithOptions]
+// surfaces the underlying constructor error) and returned in a [MultiError]
+// when applied via [Client.Mutate] or [Transaction.Mutate].
 func (m *Mutation) WithTransforms(transforms ...PropertyTransform) *Mutation {
 	if m.err != nil {
 		return m

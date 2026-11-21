@@ -45,7 +45,8 @@ type datastoreClientOption interface {
 
 // WithIgnoreFieldMismatch configures the [Client] to ignore *[ErrFieldMismatch]
 // errors during read and query operations ([Client.Get], [Client.GetMulti],
-// [Client.GetAll], [Iterator.Next], [Transaction.Get], and [Transaction.GetMulti]).
+// [Client.GetAll], [Client.GetAllWithOptions], [Iterator.Next],
+// [Transaction.Get], and [Transaction.GetMulti]).
 // It does not affect standalone [LoadStruct] calls, and it does not suppress
 // *[ErrFieldMismatch] if wrapped by a custom [PropertyLoadSaver].
 //

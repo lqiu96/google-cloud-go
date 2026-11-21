@@ -50,7 +50,7 @@ func (s Schema) Relax() Schema {
 }
 
 // ToJSONFields exposes the schema as a JSON array of
-// TableFieldSchema objects: https://cloud.google.com/bigquery/docs/reference/rest/v2/tables#TableFieldSchema
+// TableFieldSchema objects: https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/tables#TableFieldSchema
 //
 // Generally this isn't needed for direct usage of this library, but is
 // provided for use cases where you're interacting with other tools
@@ -150,7 +150,7 @@ type FieldSchema struct {
 	// The following values are supported:
 	//   - 'und:ci': undetermined locale, case insensitive.
 	//   - '': empty string. Default to case-sensitive behavior.
-	// More information: https://cloud.google.com/bigquery/docs/reference/standard-sql/collation-concepts
+	// More information: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/collation-concepts
 	Collation string
 
 	// Information about the range.
@@ -228,7 +228,7 @@ func bqToRangeElementType(rt *bq.TableFieldSchemaRangeElementType) *RangeElement
 }
 
 // PolicyTagList represents the annotations on a schema column for enforcing column-level security.
-// For more information, see https://cloud.google.com/bigquery/docs/column-level-security-intro
+// For more information, see https://docs.cloud.google.com/bigquery/docs/column-level-security-intro
 type PolicyTagList struct {
 	Names []string
 }
@@ -753,7 +753,7 @@ func validateKnownType(in FieldType) (FieldType, error) {
 // https://github.com/GoogleCloudPlatform/protoc-gen-bq-schema.
 //
 // The expected format is a JSON array of TableFieldSchema objects from the underlying API:
-// https://cloud.google.com/bigquery/docs/reference/rest/v2/tables#TableFieldSchema
+// https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/tables#TableFieldSchema
 func SchemaFromJSON(schemaJSON []byte) (Schema, error) {
 
 	// Make sure we actually have some content:

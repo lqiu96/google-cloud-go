@@ -572,9 +572,9 @@ directly rather than as MultiError.
 By default, the gRPC service config sets a 60-second RPC timeout with
 waitForReady enabled and up to 5 automatic retry attempts on UNAVAILABLE for
 all RPCs (including non-transactional writes) and on DEADLINE_EXCEEDED,
-INTERNAL, and RESOURCE_EXHAUSTED for reads (Lookup, RunQuery,
-RunAggregationQuery, and ReserveIds). Pass a shorter context deadline for
-fail-fast calls.
+INTERNAL, and RESOURCE_EXHAUSTED for reads and ID reservations (Lookup,
+RunQuery, RunAggregationQuery, and ReserveIds). Pass a shorter context deadline
+for fail-fast calls.
 
 # Google Cloud Datastore Emulator
 
@@ -586,6 +586,10 @@ disabling authentication and using insecure gRPC credentials automatically.
 To install and set up the emulator and its environment variables, see the
 documentation at
 https://docs.cloud.google.com/datastore/docs/tools/datastore-emulator.
+For Firestore in Datastore mode, start the Firestore emulator in Datastore mode
+instead of the legacy Cloud Datastore emulator:
+
+	gcloud emulators firestore start --database-mode=datastore-mode
 
 When DATASTORE_EMULATOR_HOST is set, passing [DetectProjectID] falls back to
 "dummy-emulator-datastore-project" if credential detection fails, whereas

@@ -80,9 +80,9 @@ type Entity struct {
 
 // PropertyLoadSaver can be converted from and to a slice of [Property] values.
 //
-// Implementations used as nested struct fields must define Load and Save on a
-// pointer receiver (value receivers return an error when loading or saving
-// nested fields).
+// Implementations used as non-pointer nested struct fields must define Load and
+// Save on a pointer receiver (value receivers return an error when loading or
+// saving non-pointer nested fields).
 //
 // Warning: If a struct embeds another struct that implements PropertyLoadSaver,
 // the embedding struct inherits the Load and Save methods. Saving the embedding
@@ -291,9 +291,9 @@ func newStructPLS(p interface{}) (*structPLS, error) {
 // dst must be a struct pointer.
 //
 // Unmatched struct fields in dst are not modified. Matching slice-typed fields
-// are overwritten starting at index 0, leaving any trailing elements from a
-// longer pre-populated slice intact. Always pass a pointer to a fresh
-// zero-valued struct on each LoadStruct call.
+// (other than []byte) are overwritten starting at index 0, leaving any trailing
+// elements from a longer pre-populated slice intact. Always pass a pointer to a
+// fresh zero-valued struct on each LoadStruct call.
 func LoadStruct(dst interface{}, p []Property) error {
 	x, err := newStructPLS(dst)
 	if err != nil {

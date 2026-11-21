@@ -146,9 +146,9 @@ type Client struct {
 // By default, RPCs use a 60-second timeout with waitForReady enabled and
 // automatic retries (up to 5 attempts) on UNAVAILABLE for all RPCs (including
 // non-transactional writes) and on DEADLINE_EXCEEDED, INTERNAL, and
-// RESOURCE_EXHAUSTED for reads (Lookup, RunQuery, RunAggregationQuery, and
-// ReserveIds). Pass a shorter per-call context deadline for fail-fast calls.
-// Call [Client.Close] when finished.
+// RESOURCE_EXHAUSTED for reads and ID reservations (Lookup, RunQuery,
+// RunAggregationQuery, and ReserveIds). Pass a shorter per-call context
+// deadline for fail-fast calls. Call [Client.Close] when finished.
 func NewClient(ctx context.Context, projectID string, opts ...option.ClientOption) (*Client, error) {
 	client, err := NewClientWithDatabase(ctx, projectID, DefaultDatabaseID, opts...)
 	if err != nil {
@@ -516,9 +516,10 @@ func (c *Client) Close() error {
 // returns [ErrNoSuchEntity].
 //
 // Unmatched struct fields in dst are not modified. For matching slice-typed
-// fields, pre-populated elements are overwritten starting at index 0 and any
-// trailing elements beyond the loaded array length are retained. Always pass a
-// pointer to a fresh zero-valued struct on each Get call.
+// fields (other than []byte), pre-populated elements are overwritten starting
+// at index 0 and any trailing elements beyond the loaded array length are
+// retained. Always pass a pointer to a fresh zero-valued struct on each Get
+// call.
 //
 // *[ErrFieldMismatch] is returned only if dst is a struct pointer. Matching
 // fields are still loaded into dst, and only one mismatch is reported if
@@ -791,10 +792,10 @@ func (c *Client) PutWithOptions(ctx context.Context, req *PutRequest, opts ...Pu
 // incomplete keys are not mutated.
 //
 // Writes are committed in NON_TRANSACTIONAL mode (not atomic across entities).
-// Datastore allows at most 500 entities per commit, and PutMulti does not
-// automatically chunk larger slices. Duplicate keys in a single PutMulti call
-// fail on the server. Per-entity validation errors return [MultiError], while
-// whole-call RPC errors are returned directly.
+// Requests are subject to Datastore's 10 MiB maximum API request size, and
+// PutMulti does not automatically chunk larger batches. Duplicate keys in a
+// single PutMulti call fail on the server. Per-entity validation errors return
+// [MultiError], while whole-call RPC errors are returned directly.
 func (c *Client) PutMulti(ctx context.Context, keys []*Key, src interface{}) (ret []*Key, err error) {
 	// TODO(jba): rewrite in terms of Mutate.
 	return c.putMultiInternal(ctx, keys, src, nil)
@@ -805,10 +806,10 @@ func (c *Client) PutMulti(ctx context.Context, keys []*Key, src interface{}) (re
 // Each [PutRequest] replaces its entire entity before applying its transforms
 // (use [Client.Mutate] with an empty [Mutation.WithPropertyMask]() for
 // transform-only updates). Writes are committed in NON_TRANSACTIONAL mode (not
-// atomic across entities), with a server limit of 500 entities per commit and
-// no automatic chunking. The returned keys match the order of reqs, and input
-// incomplete keys are not mutated. Per-entity validation errors return
-// [MultiError], while whole-call RPC errors are returned directly.
+// atomic across entities), subject to Datastore's 10 MiB maximum API request
+// size with no automatic chunking. The returned keys match the order of reqs,
+// and input incomplete keys are not mutated. Per-entity validation errors
+// return [MultiError], while whole-call RPC errors are returned directly.
 func (c *Client) PutMultiWithOptions(ctx context.Context, reqs []*PutRequest, opts ...PutOption) (ret []*Key, err error) {
 	var keys []*Key
 	var transforms [][]PropertyTransform
@@ -967,7 +968,7 @@ func (c *Client) Delete(ctx context.Context, key *Key) error {
 // succeeds without error.
 //
 // Deletions are committed in NON_TRANSACTIONAL mode (not atomic across
-// entities), subject to Datastore's 500-entity per-commit limit with no
+// entities), subject to Datastore's 10 MiB maximum API request size with no
 // automatic chunking. Per-key validation errors return [MultiError], while
 // whole-call RPC errors are returned directly.
 func (c *Client) DeleteMulti(ctx context.Context, keys []*Key) (err error) {
@@ -1019,9 +1020,9 @@ func deleteMutations(keys []*Key) ([]*pb.Mutation, error) {
 }
 
 // Mutate applies one or more mutations in NON_TRANSACTIONAL mode (not atomic
-// across entities). If you need atomicity, use [Transaction.Mutate]. Datastore
-// allows at most 500 entities per commit, and Mutate does not automatically
-// chunk larger batches.
+// across entities). If you need atomicity, use [Transaction.Mutate]. Requests
+// are subject to Datastore's 10 MiB maximum API request size, and Mutate does
+// not automatically chunk larger batches.
 //
 // Mutate returns the keys of muts in the same order without mutating incomplete
 // input keys. If any mutation has a client-side validation error, Mutate returns
@@ -1065,6 +1066,12 @@ func (c *Client) Mutate(ctx context.Context, muts ...*Mutation) (ret []*Key, err
 // ReadTime specifies a snapshot timestamp of the database to read entities from.
 // Pass ReadTime(time.Time{}) to [Client.WithReadOptions] to clear a previously
 // configured read time.
+//
+// Datastore requires microsecond precision (truncate time.Now() with
+// t.Truncate(time.Microsecond)) within the past 1 hour by default, or
+// whole-minute timestamps within the past 7 days when point-in-time recovery
+// (PITR) is enabled. Note that [Client.Get] and [Client.GetMulti] truncate a
+// client-level ReadTime to whole seconds.
 func ReadTime(t time.Time) ReadOption {
 	return docReadTime(t)
 }

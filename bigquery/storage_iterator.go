@@ -369,13 +369,15 @@ func (it *storageArrowIterator) Schema() Schema {
 // BigQuery Storage Read API (configured via [Client.EnableStorageReadClient]).
 //
 // Because read session setup silently falls back to the REST API on errors or
-// unsupported sources (such as views, missing bigquery.readsessions.create
-// permission, or single-page fast-path queries), call IsAccelerated to verify
-// acceleration is active. When true, [RowIterator.StartIndex] and
-// [RowIterator.PageInfo] pagination are unsupported, [RowIterator.TotalRows] is
-// an estimate, BigQuery INTERVAL columns are currently unsupported during
-// built-in Arrow decoding, and callers should cancel the iterator's context if
-// stopping before [iterator.Done] to avoid leaking background goroutines.
+// unsupported sources (such as missing bigquery.readsessions.create permission
+// or single-page fast-path queries), call IsAccelerated to verify acceleration
+// is active. Note that [Table.Read] also fails on REST for views and external
+// tables (query them with [Client.Query] instead). When true,
+// [RowIterator.StartIndex] and [RowIterator.PageInfo] pagination are
+// unsupported, [RowIterator.TotalRows] is an estimate, BigQuery INTERVAL
+// columns are currently unsupported during built-in Arrow decoding, and callers
+// should cancel the iterator's context if stopping before [iterator.Done] to
+// avoid leaking background goroutines.
 func (it *RowIterator) IsAccelerated() bool {
 	return it.arrowIterator != nil
 }

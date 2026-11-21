@@ -272,9 +272,9 @@ func decodeCloudKey(encoded string) (*Key, error) {
 // AllocateIDs accepts a slice of incomplete keys and returns a new slice of
 // complete keys in the same order without mutating the input keys.
 //
-// Every element in keys must be a valid incomplete key, and Cloud Datastore
-// allows at most 500 keys per call (callers must chunk larger slices). If keys
-// is nil, AllocateIDs returns (nil, nil).
+// Every element in keys must be a valid incomplete key. Requests are subject
+// to Datastore's 10 MiB maximum API request size, so callers should chunk very
+// large slices. If keys is nil, AllocateIDs returns (nil, nil).
 func (c *Client) AllocateIDs(ctx context.Context, keys []*Key) ([]*Key, error) {
 	if keys == nil {
 		return nil, nil
@@ -296,9 +296,11 @@ func (c *Client) AllocateIDs(ctx context.Context, keys []*Key) ([]*Key, error) {
 // ReserveIDs prevents the given complete keys from being auto-allocated by
 // Datastore.
 //
-// Every key must be complete with a numeric ID (not a string Name or an
-// incomplete key), and Cloud Datastore allows at most 500 keys per call
-// (callers must chunk larger slices). If keys is nil, ReserveIDs returns nil.
+// Every key must be complete (incomplete keys are rejected by Datastore). Only
+// numeric ID keys are reserved, since Datastore never auto-allocates string
+// names. Requests are subject to Datastore's 10 MiB maximum API request size,
+// so callers should chunk very large slices. If keys is nil, ReserveIDs
+// returns nil.
 func (c *Client) ReserveIDs(ctx context.Context, keys []*Key) error {
 	if keys == nil {
 		return nil

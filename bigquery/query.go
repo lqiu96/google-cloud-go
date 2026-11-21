@@ -77,6 +77,7 @@ type QueryConfig struct {
 	DisableFlattenedResults bool
 
 	// AllowLargeResults allows the query to produce arbitrarily large result tables.
+	// This option applies only when UseLegacySQL is true (it is ignored in Standard SQL).
 	// The destination must be a table.
 	// When using this option, queries will take longer to execute, even if the result set is small.
 	// For additional limitations, see https://docs.cloud.google.com/bigquery/docs/writing-results#large-results.
@@ -352,20 +353,16 @@ type QueryPriority string
 
 const (
 	// BatchPriority specifies that the query should be scheduled with the
-	// batch priority.  BigQuery queues each batch query on your behalf, and
+	// batch priority. BigQuery queues each batch query on your behalf and
 	// starts the query as soon as idle resources are available, usually within
-	// a few minutes. If BigQuery hasn't started the query within 24 hours,
-	// BigQuery changes the job priority to interactive. Batch queries don't
-	// count towards your concurrent rate limit, which can make it easier to
-	// start many queries at once.
+	// a few minutes. Batch queries are queued separately from interactive
+	// queries, which can make it easier to start many queries at once.
 	//
 	// More information can be found at https://docs.cloud.google.com/bigquery/docs/running-queries#batch.
 	BatchPriority QueryPriority = "BATCH"
 	// InteractivePriority specifies that the query should be scheduled with
 	// interactive priority, which means that the query is executed as soon as
-	// possible. Interactive queries count towards your concurrent rate limit
-	// and your daily limit. It is the default priority with which queries get
-	// executed.
+	// possible. It is the default priority with which queries get executed.
 	//
 	// More information can be found at https://docs.cloud.google.com/bigquery/docs/running-queries#queries.
 	InteractivePriority QueryPriority = "INTERACTIVE"
@@ -399,8 +396,9 @@ func (c *Client) Query(q string) *Query {
 // or [Job.Read].
 //
 // If the submitted job fails with a transient job error (such as
-// jobRateLimitExceeded, jobBackendError, or jobInternalError), submit a new
-// query with a new job ID rather than retrying or polling the failed job.
+// jobRateLimitExceeded or other temporary reasons listed at
+// https://docs.cloud.google.com/bigquery/docs/errors), submit a new query with
+// a new job ID rather than retrying or polling the failed job.
 func (q *Query) Run(ctx context.Context) (j *Job, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/bigquery.Query.Run")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -431,11 +429,14 @@ func (q *Query) newJob() (*bq.Job, error) {
 // [RowIterator].
 //
 // When all configured options are supported, Read uses the stateless jobs.query
-// fast path instead of jobs.insert. Under [JobCreationModeOptional], BigQuery
-// may execute the query without creating a job, in which case
-// [RowIterator.SourceJob] returns nil and [RowIterator.QueryID] identifies the
-// query. Single-page fast-path results stay on REST even when
-// [Client.EnableStorageReadClient] is enabled.
+// fast path instead of jobs.insert. Note that the fast path sends only
+// q.Location ([JobIDConfig.Location]) and does not inherit [Client.Location],
+// so set q.Location directly when targeting a specific region (especially for
+// queries or scripts that do not reference a dataset). Under
+// [JobCreationModeOptional], BigQuery may execute the query without creating a
+// job, in which case [RowIterator.SourceJob] returns nil and
+// [RowIterator.QueryID] identifies the query. Single-page fast-path results
+// stay on REST even when [Client.EnableStorageReadClient] is enabled.
 //
 // For unsupported options, Read falls back to [Query.Run] followed by
 // [Job.Read]. Call [Query.Run] directly when you need guaranteed job metadata

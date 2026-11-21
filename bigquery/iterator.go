@@ -237,7 +237,7 @@ func isStructPtr(x any) bool {
 // Pagination is not supported when the Storage Read API is active
 // ([RowIterator.IsAccelerated] returns true). On an accelerated iterator,
 // PageInfo().Token and PageInfo().MaxSize are ignored, and calling
-// PageInfo().Remaining() or iterator.NewPager will panic.
+// PageInfo().Remaining() or calling NextPage on iterator.NewPager will panic.
 func (it *RowIterator) PageInfo() *iterator.PageInfo { return it.pageInfo }
 
 func (it *RowIterator) fetch(pageSize int, pageToken string) (string, error) {
