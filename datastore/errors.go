@@ -20,9 +20,15 @@ import (
 	"fmt"
 )
 
-// MultiError is returned by batch operations when there are errors with
-// particular elements. Errors will be in a one-to-one correspondence with
-// the input elements; successful elements will have a nil entry.
+// MultiError is returned by batch operations ([Client.GetMulti], [Client.PutMulti],
+// [Client.DeleteMulti], [Client.Mutate], and their [Transaction] equivalents) when
+// per-entity errors occur. Errors are in one-to-one correspondence with the input
+// elements, with nil entries for elements that succeeded. Whole-call RPC or context
+// errors are returned directly rather than as MultiError.
+//
+// MultiError does not implement Unwrap, so errors.Is and errors.As do not match
+// element errors such as [ErrNoSuchEntity] or *[ErrFieldMismatch]. Extract
+// MultiError with errors.As(err, &me) and inspect each me[i] individually.
 type MultiError []error
 
 func (m MultiError) Error() string {

@@ -30,8 +30,9 @@ import (
 
 const maxIndividualReqTxnRetry = 5
 
-// ErrConcurrentTransaction is returned when a transaction is rolled back due
-// to a conflict with a concurrent transaction.
+// ErrConcurrentTransaction is returned by [Transaction.Commit] when a
+// transaction conflicts with a concurrent transaction (gRPC codes.Aborted).
+// [Client.RunInTransaction] retries automatically on ErrConcurrentTransaction.
 var ErrConcurrentTransaction = errors.New("datastore: concurrent transaction")
 
 var (
@@ -86,7 +87,9 @@ type TransactionOption interface {
 	apply(*transactionSettings)
 }
 
-// MaxAttempts returns a TransactionOption that overrides the default 3 attempt times.
+// MaxAttempts returns a [TransactionOption] that overrides the default of 3
+// attempts for [Client.RunInTransaction]. Non-positive values (<= 0) are
+// ignored. MaxAttempts is rejected by [Client.NewTransaction].
 func MaxAttempts(attempts int) TransactionOption {
 	return maxAttempts(attempts)
 }
@@ -99,8 +102,9 @@ func (w maxAttempts) apply(s *transactionSettings) {
 	}
 }
 
-// WithReadTime returns a TransactionOption that specifies a snapshot of the
-// database to view.
+// WithReadTime returns a [TransactionOption] that reads entities as of the
+// given snapshot timestamp. It only takes effect when combined with [ReadOnly].
+// Without [ReadOnly], WithReadTime is silently ignored.
 func WithReadTime(t time.Time) TransactionOption {
 	return readTime{t}
 }
@@ -115,7 +119,10 @@ func (rt readTime) apply(s *transactionSettings) {
 	}
 }
 
-// ReadOnly is a TransactionOption that marks the transaction as read-only.
+// ReadOnly is a [TransactionOption] that marks the transaction as read-only.
+// Read-only transactions are required for [WithReadTime].
+// [Client.RunInTransaction] still retries ReadOnly transactions on transient
+// errors. Writes enqueued on a ReadOnly transaction fail at [Transaction.Commit].
 var ReadOnly TransactionOption
 
 func init() {
@@ -129,7 +136,11 @@ func (readOnly) apply(s *transactionSettings) {
 	s.readOnly = true
 }
 
-// BeginLater is a TransactionOption that can be used to improve transaction performance
+// BeginLater is a [TransactionOption] that defers the BeginTransaction RPC and
+// piggybacks transaction creation onto the first transactional read
+// ([Transaction.Get], [Transaction.GetMulti], or a transactional query), saving
+// a round trip. If no read occurs before [Transaction.Commit], BeginTransaction
+// is called at commit time.
 var BeginLater TransactionOption
 
 type beginLater struct{}
@@ -148,13 +159,15 @@ const (
 
 // Transaction represents a set of datastore operations to be committed atomically.
 //
-// Operations are enqueued by calling the Put and Delete methods on Transaction
-// (or their Multi-equivalents).  These operations are only committed when the
-// Commit method is invoked. To ensure consistency, reads must be performed by
-// using Transaction's Get method or by using the Transaction method when
-// building a query.
+// Writes ([Transaction.Put], [Transaction.Delete], [Transaction.Mutate], and
+// their Multi equivalents) are buffered locally until [Transaction.Commit] is
+// invoked and are not visible to subsequent reads or queries in the same
+// transaction. To participate in the transaction, perform reads via
+// [Transaction.Get], [Transaction.GetMulti], or queries configured with
+// [Query.Transaction] rather than standalone [Client] methods.
 //
-// A Transaction must be committed or rolled back exactly once.
+// A Transaction is not safe for concurrent use by multiple goroutines and must
+// be committed or rolled back exactly once.
 type Transaction struct {
 	id        []byte
 	client    *Client
@@ -166,7 +179,16 @@ type Transaction struct {
 	stateLock sync.Mutex
 }
 
-// NewTransaction starts a new transaction.
+// NewTransaction starts a new transaction for manual lifecycle management.
+// Prefer [Client.RunInTransaction] when automatic retry on conflict is desired.
+//
+// NewTransaction performs no automatic retry and rejects [MaxAttempts]. It
+// captures ctx and uses it for all subsequent calls on the returned
+// [Transaction], including [Transaction.Commit] and [Transaction.Rollback].
+// Unless [BeginLater] is passed, the transaction starts immediately and holds
+// server locks until Commit or Rollback is called or the transaction expires
+// (60 seconds idle or 270 seconds total). Always commit or roll back the
+// transaction to release locks.
 func (c *Client) NewTransaction(ctx context.Context, opts ...TransactionOption) (t *Transaction, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/datastore.NewTransaction")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -312,30 +334,28 @@ func (c *Client) newTransaction(ctx context.Context, s *transactionSettings) (_ 
 	return t, nil
 }
 
-// RunInTransaction runs f in a transaction. f is invoked with a Transaction
-// that f should use for all the transaction's datastore operations.
+// RunInTransaction runs f in a transaction and commits on a nil return.
+// f must not call [Transaction.Commit] or [Transaction.Rollback].
 //
-// f must not call Commit or Rollback on the provided Transaction.
+// RunInTransaction retries up to 3 times by default (configurable with
+// [MaxAttempts], which ignores non-positive values) when f or Commit returns a
+// retryable gRPC error: Aborted ([ErrConcurrentTransaction]), DeadlineExceeded,
+// Internal, Canceled, Unknown, or Unauthenticated. [ReadOnly] transactions also
+// retry on transient errors. Before each retry, on a non-retryable error, or if
+// f panics, the transaction is rolled back automatically (panics are propagated
+// after rollback).
 //
-// If f returns nil, RunInTransaction commits the transaction,
-// returning the Commit and a nil error if it succeeds. If the commit fails,
-// transaction is rolled back. If commit error is retryable, RunInTransaction
-// retries f with a new Transaction. It gives up and returns last seen commit
-// error or f error after three failed attempts (or as configured with MaxAttempts).
+// Inside f, perform all transactional reads and writes via tx or
+// [Query.Transaction] rather than standalone [Client] methods. Writes are
+// buffered locally until Commit and are not visible to reads or queries in the
+// same transaction. Enqueued writes on a [ReadOnly] transaction fail at Commit.
+// Calling code must not assume changes are committed until RunInTransaction
+// returns a nil error.
 //
-// If f returns non-nil, then the transaction will be rolled back. If f error
-// is retryable, RunInTransaction retries f with a new Transaction. It gives up
-// and returns last seen commit or f error after three failed attempts (or as
-// configured with MaxAttempts).
-//
-// Note that when f returns, the transaction is not committed. Calling code
-// must not assume that any of f's changes have been committed until
-// RunInTransaction returns nil.
-//
-// Since f may be called multiple times, f should usually be idempotent – that
-// is, it should have the same result when called multiple times. Note that
-// Transaction.Get will append when unmarshalling slice fields, so it is not
-// necessarily idempotent.
+// Because f may be called multiple times, keep f idempotent and reset any outer
+// variables (including captured [*PendingKey] values) on each invocation. Pass
+// a fresh zero-valued struct to [Transaction.Get], because pre-populated slice
+// fields are overwritten from index 0 with any trailing elements retained.
 func (c *Client) RunInTransaction(ctx context.Context, f func(tx *Transaction) error, opts ...TransactionOption) (cmt *Commit, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/datastore.RunInTransaction")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -428,7 +448,10 @@ func grpcStatusCode(err error) (codes.Code, error) {
 	return s.Code(), nil
 }
 
-// Commit applies the enqueued operations atomically.
+// Commit applies the enqueued operations atomically using the context captured
+// when the transaction was created. On a concurrency conflict (gRPC
+// codes.Aborted), Commit returns [ErrConcurrentTransaction]. Enqueued writes on
+// a [ReadOnly] transaction fail at Commit.
 func (t *Transaction) Commit() (c *Commit, err error) {
 	ctx := trace.StartSpan(t.ctx, "cloud.google.com/go/datastore.Transaction.Commit")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -515,7 +538,11 @@ func (t *Transaction) rollbackWithRetry() error {
 	return rollbackErr
 }
 
-// Rollback abandons a pending transaction.
+// Rollback abandons a pending transaction and releases server locks. Rollback
+// uses the context captured when the transaction was created (if that context
+// has already been canceled, Rollback fails). Calling Rollback after a
+// successful [Transaction.Commit] or a prior Rollback returns an
+// expired-transaction error.
 func (t *Transaction) Rollback() (err error) {
 	ctx := trace.StartSpan(t.ctx, "cloud.google.com/go/datastore.Transaction.Rollback")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -596,11 +623,9 @@ func (t *Transaction) get(spanName string, keys []*Key, dst interface{}) (err er
 	return t.client.processFieldMismatchError(err)
 }
 
-// Get is the transaction-specific version of the package function Get.
-// All reads performed during the transaction will come from a single consistent
-// snapshot. Furthermore, if the transaction is set to a serializable isolation
-// level, another transaction cannot concurrently modify the data that is read
-// or modified by this transaction.
+// Get is the transaction-specific version of [Client.Get].
+// All reads performed during the transaction come from a single consistent
+// snapshot and do not see writes buffered in the same transaction.
 func (t *Transaction) Get(key *Key, dst interface{}) (err error) {
 	err = t.get("cloud.google.com/go/datastore.Transaction.Get", []*Key{key}, []interface{}{dst})
 	if me, ok := err.(MultiError); ok {
@@ -609,27 +634,30 @@ func (t *Transaction) Get(key *Key, dst interface{}) (err error) {
 	return t.client.processFieldMismatchError(err)
 }
 
-// GetMulti is a batch version of Get.
+// GetMulti is a batch version of [Transaction.Get]. See [Client.GetMulti] for
+// dst requirements, batch limits, and [MultiError] handling.
 func (t *Transaction) GetMulti(keys []*Key, dst interface{}) (err error) {
 	return t.get("cloud.google.com/go/datastore.Transaction.GetMulti", keys, dst)
 }
 
-// Put is the transaction-specific version of the package function [*Client.Put].
+// Put is the transaction-specific version of [Client.Put].
 //
-// Put returns a PendingKey which can be resolved into a Key using the
-// return value from a successful Commit. If key is an incomplete key, the
-// returned pending key will resolve to a unique key generated by
-// Datastore.
+// The write is buffered locally until [Transaction.Commit] and is not visible
+// to reads in the same transaction. Put returns a [PendingKey] that can be
+// resolved into a [*Key] using [Commit.Key] after Commit succeeds. For an
+// incomplete key, the returned PendingKey resolves to a unique key generated by
+// Datastore (to create a parent and child entity in one transaction, allocate
+// the parent key first with [Client.AllocateIDs]).
 func (t *Transaction) Put(key *Key, src interface{}) (*PendingKey, error) {
 	return t.PutWithOptions(&PutRequest{Key: key, Entity: src})
 }
 
-// PutWithOptions is the transaction-specific version of the package function [*Client.PutWithOptions].
+// PutWithOptions is the transaction-specific version of [Client.PutWithOptions].
 //
-// PutWithOptions returns a PendingKey which can be resolved into a Key using the
-// return value from a successful Commit. If key is an incomplete key, the
-// returned pending key will resolve to a unique key generated by
-// Datastore.
+// The write is buffered locally until [Transaction.Commit] and overwrites the
+// entire entity before applying transforms (use [Transaction.Mutate] with an
+// empty [Mutation.WithPropertyMask]() for transform-only updates). PutWithOptions
+// returns a [PendingKey] resolved via [Commit.Key] after Commit succeeds.
 func (t *Transaction) PutWithOptions(req *PutRequest, opts ...PutOption) (*PendingKey, error) {
 	h, err := t.PutMultiWithOptions([]*PutRequest{req})
 	if err != nil {
@@ -641,16 +669,19 @@ func (t *Transaction) PutWithOptions(req *PutRequest, opts ...PutOption) (*Pendi
 	return h[0], nil
 }
 
-// PutMulti is a batch version of Put.
+// PutMulti is a batch version of [Transaction.Put].
 //
-// src must satisfy the same conditions as the dst argument to GetMulti.
-// err may be a MultiError. See ExampleMultiError to check it.
+// src must satisfy the same conditions as dst in [Client.GetMulti]. Writes are
+// buffered locally until [Transaction.Commit] (subject to Datastore's 500-entity
+// per-commit limit). err may be a [MultiError].
 // TODO(jba): rewrite in terms of Mutate.
 func (t *Transaction) PutMulti(keys []*Key, src interface{}) (ret []*PendingKey, err error) {
 	return t.putMultiInternal(keys, src, nil)
 }
 
-// PutMultiWithOptions is the transaction-specific version of the package function [*Client.PutMultiWithOptions].
+// PutMultiWithOptions is the transaction-specific version of [Client.PutMultiWithOptions].
+// Writes are buffered locally until [Transaction.Commit] (max 500 entities per
+// commit) and overwrite each entity before applying transforms.
 func (t *Transaction) PutMultiWithOptions(reqs []*PutRequest, opts ...PutOption) (ret []*PendingKey, err error) {
 	var keys []*Key
 	var transforms [][]PropertyTransform
@@ -691,9 +722,10 @@ func (t *Transaction) putMultiInternal(keys []*Key, src interface{}, transforms 
 	return ret, nil
 }
 
-// Delete is the transaction-specific version of the package function Delete.
+// Delete is the transaction-specific version of [Client.Delete].
 // Delete enqueues the deletion of the entity for the given key, to be
-// committed atomically upon calling Commit.
+// committed atomically upon calling [Transaction.Commit]. Deleting a nonexistent
+// key succeeds without error.
 func (t *Transaction) Delete(key *Key) error {
 	err := t.DeleteMulti([]*Key{key})
 	if me, ok := err.(MultiError); ok {
@@ -702,7 +734,7 @@ func (t *Transaction) Delete(key *Key) error {
 	return err
 }
 
-// DeleteMulti is a batch version of Delete.
+// DeleteMulti is a batch version of [Transaction.Delete].
 // TODO(jba): rewrite in terms of Mutate.
 func (t *Transaction) DeleteMulti(keys []*Key) (err error) {
 	if t.state == transactionStateExpired {
@@ -716,14 +748,13 @@ func (t *Transaction) DeleteMulti(keys []*Key) (err error) {
 	return nil
 }
 
-// Mutate adds the mutations to the transaction. They will all be applied atomically
-// upon calling Commit. Mutate returns a PendingKey for each Mutation in the argument
-// list, in the same order. PendingKeys for Delete mutations are always nil.
+// Mutate enqueues mutations to be applied atomically upon calling
+// [Transaction.Commit] (max 500 entities per commit). Enqueued writes are not
+// visible to reads in the same transaction. Mutate returns a [PendingKey] for
+// each [Mutation] in order, with nil entries for delete mutations.
 //
-// If any of the mutations are invalid, Mutate returns a MultiError with the errors.
-// Mutate returns a MultiError in this case even if there is only one Mutation.
-//
-// For an example, see Client.Mutate.
+// If any mutation has a client-side validation error, Mutate returns a
+// [MultiError] even when only one mutation was passed.
 func (t *Transaction) Mutate(muts ...*Mutation) ([]*PendingKey, error) {
 	if t.state == transactionStateExpired {
 		return nil, errExpiredTransaction
@@ -755,7 +786,12 @@ func (t *Transaction) Mutate(muts ...*Mutation) ([]*PendingKey, error) {
 // Commit represents the result of a committed transaction.
 type Commit struct{}
 
-// Key resolves a pending key handle into a final key.
+// Key resolves a [PendingKey] handle into a final [*Key].
+//
+// Key returns nil if p is nil (for example, a PendingKey returned by
+// [Transaction.Mutate] for a delete mutation) or if p came from an incomplete
+// key in an uncommitted or failed transaction attempt. Key panics if p came
+// from an incomplete key resolved by a different committed transaction.
 func (c *Commit) Key(p *PendingKey) *Key {
 	if p == nil { // if called on a *PendingKey from a Delete mutation
 		return nil
@@ -768,8 +804,15 @@ func (c *Commit) Key(p *PendingKey) *Key {
 	return p.key
 }
 
-// PendingKey represents the key for newly-inserted entity. It can be
-// resolved into a Key by calling the Key method of Commit.
+// PendingKey represents a handle to the key for an entity written in a
+// transaction. Resolve it into a final [*Key] by calling [Commit.Key] after the
+// transaction commits.
+//
+// Inside [Client.RunInTransaction], overwrite or reset any captured *PendingKey
+// variables on each invocation of f so stale handles from retried attempts are
+// not passed to Commit.Key. To create a parent and child entity together in a
+// single transaction, pre-allocate the parent key with [Client.AllocateIDs]
+// instead of waiting for Commit.Key.
 type PendingKey struct {
 	key    *Key
 	commit *Commit

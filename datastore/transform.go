@@ -22,17 +22,25 @@ import (
 )
 
 // PropertyTransform represents a server-side transformation to be applied to a property.
-// Instances should be created using the specific transform functions (e.g., Increment,
-// SetToServerTime, AppendMissingElements).
+// Create instances using [Increment], [SetToServerTime], [Maximum], [Minimum],
+// [AppendMissingElements], or [RemoveAllFromArray].
+//
+// Transform constructors do not return an error directly. Any argument conversion
+// error is stored on the PropertyTransform and surfaced when the transform is
+// applied via [Client.PutWithOptions], [Client.PutMultiWithOptions], [Client.Mutate],
+// or their [Transaction] equivalents.
 type PropertyTransform struct {
 	pb  *pb.PropertyTransform
 	err error
 }
 
-// Increment returns a PropertyTransform that atomically adds the given numeric value
-// to the property's current numeric value.
-// Accepted types for value: int, int8, int16, int32, int64, uint8, uint16, uint32, float32, float64.
-// fieldName is the name of the property to transform.
+// Increment returns a [PropertyTransform] that atomically adds value to the
+// property's current numeric value. If the property does not exist or is not
+// numeric, Datastore sets it to value.
+//
+// Accepted types for value are int, int8, int16, int32, int64, uint8, uint16,
+// uint32, float32, and float64. Unsupported types (including uint, uint64, and
+// uintptr) defer an error until the transform is applied.
 func Increment(fieldName string, value interface{}) PropertyTransform {
 	pbVal, err := toNumericValue(value)
 	if err != nil {
@@ -62,10 +70,13 @@ func SetToServerTime(fieldName string) PropertyTransform {
 	}
 }
 
-// Maximum returns a PropertyTransform that atomically sets the property to the maximum
-// of its current numeric value and the given numeric value.
-// Accepted types for value: int, int8, int16, int32, int64, uint8, uint16, uint32, float32, float64.
-// fieldName is the name of the property to transform.
+// Maximum returns a [PropertyTransform] that atomically sets the property to the
+// maximum of its current numeric value and value. If the property does not exist
+// or is not numeric, Datastore sets it to value.
+//
+// Accepted types for value are int, int8, int16, int32, int64, uint8, uint16,
+// uint32, float32, and float64. Unsupported types (including uint, uint64, and
+// uintptr) defer an error until the transform is applied.
 func Maximum(fieldName string, value interface{}) PropertyTransform {
 	pbVal, err := toNumericValue(value)
 	if err != nil {
@@ -81,10 +92,13 @@ func Maximum(fieldName string, value interface{}) PropertyTransform {
 	}
 }
 
-// Minimum returns a PropertyTransform that atomically sets the property to the minimum
-// of its current numeric value and the given numeric value.
-// Accepted types for value: int, int8, int16, int32, int64, uint8, uint16, uint32, float32, float64.
-// fieldName is the name of the property to transform.
+// Minimum returns a [PropertyTransform] that atomically sets the property to the
+// minimum of its current numeric value and value. If the property does not exist
+// or is not numeric, Datastore sets it to value.
+//
+// Accepted types for value are int, int8, int16, int32, int64, uint8, uint16,
+// uint32, float32, and float64. Unsupported types (including uint, uint64, and
+// uintptr) defer an error until the transform is applied.
 func Minimum(fieldName string, value interface{}) PropertyTransform {
 	pbVal, err := toNumericValue(value)
 	if err != nil {
@@ -100,12 +114,14 @@ func Minimum(fieldName string, value interface{}) PropertyTransform {
 	}
 }
 
-// AppendMissingElements returns a PropertyTransform that atomically appends the given elements
-// to an array property, only if they are not already present.
-// If the property is not an array, or if it does not yet exist,
-// it is first set to the empty array.
-// fieldName is the name of the property to transform.
-// Returns an error if any element cannot be converted to a Datastore Value.
+// AppendMissingElements returns a [PropertyTransform] that atomically appends
+// elements to an array property if they are not already present. If the property
+// is not an array or does not yet exist, it is first set to an empty array.
+//
+// If any element cannot be converted to a Datastore value (for example, an
+// unsupported type or an indexed string or []byte over 1,500 bytes), the error
+// is stored on the returned PropertyTransform and surfaced when the transform
+// is applied.
 func AppendMissingElements(fieldName string, elements ...interface{}) PropertyTransform {
 	pbValues := make([]*pb.Value, len(elements))
 	for i, el := range elements {
@@ -126,12 +142,14 @@ func AppendMissingElements(fieldName string, elements ...interface{}) PropertyTr
 	}
 }
 
-// RemoveAllFromArray returns a PropertyTransform that atomically removes all occurrences
-// of the given elements from an array in the property.
-// If the property is not an array, or if it does not yet exist,
-// it is first set to the empty array.
-// fieldName is the name of the property to transform.
-// Returns an error if any element cannot be converted to a Datastore Value.
+// RemoveAllFromArray returns a [PropertyTransform] that atomically removes all
+// occurrences of elements from an array property. If the property is not an
+// array or does not yet exist, it is first set to an empty array.
+//
+// If any element cannot be converted to a Datastore value (for example, an
+// unsupported type or an indexed string or []byte over 1,500 bytes), the error
+// is stored on the returned PropertyTransform and surfaced when the transform
+// is applied.
 func RemoveAllFromArray(fieldName string, elements ...interface{}) PropertyTransform {
 	pbValues := make([]*pb.Value, len(elements))
 	for i, el := range elements {
