@@ -33,7 +33,7 @@ type saveOpts struct {
 	omitEmpty bool
 }
 
-// saveEntity saves an EntityProto into a PropertyLoadSaver or struct pointer.
+// saveEntity converts a PropertyLoadSaver or struct pointer into a protobuf Entity.
 func saveEntity(key *Key, src interface{}) (*pb.Entity, error) {
 	var err error
 	var props []Property
@@ -489,7 +489,6 @@ func interfaceToProto(iv interface{}, noIndex bool) (*pb.Value, error) {
 			return nil, fmt.Errorf("invalid Value type %T", iv)
 		}
 	}
-	// TODO(jbd): Support EntityValue.
 	return val, nil
 }
 

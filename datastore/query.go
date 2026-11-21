@@ -94,14 +94,20 @@ type EntityFilter interface {
 	toProto() (*pb.Filter, error)
 }
 
-// PropertyFilter represents field based filter.
+// PropertyFilter represents a filter on a single entity property.
 //
-// The operator parameter takes the following strings: ">", "<", ">=", "<=",
-// "=", "!=", "in", and "not-in".
-// Fields are compared against the provided value using the operator.
-// Field names which contain spaces, quote marks, or operator characters
-// should be passed as quoted Go string literals as returned by strconv.Quote
-// or the fmt package's %q verb.
+// Operator is case-sensitive and must be one of ">", "<", ">=", "<=", "=",
+// "!=", "in", or "not-in". For "in" and "not-in", Value must be []interface{}
+// (not a typed slice such as []string or []int).
+//
+// Value must be a supported built-in primitive (int, int32, int64, float32,
+// float64, bool, string, or []byte), [*Key], time.Time, [GeoPoint], or nil.
+// Custom defined primitive types (such as "type Status string") and unsupported
+// integer widths (such as int8, int16, or unsigned integers) are rejected.
+//
+// Field names containing spaces, quote marks, or operator characters should be
+// passed as quoted Go string literals as returned by strconv.Quote or fmt's %q
+// verb.
 type PropertyFilter struct {
 	FieldName string
 	Operator  string
@@ -232,11 +238,16 @@ func (af AndFilter) toValidFilter() (EntityFilter, error) {
 	return af, nil
 }
 
-// NewQuery creates a new Query for a specific entity kind.
+// NewQuery creates a new [Query] for a specific entity kind. Pass an entity
+// kind name, not a GQL query string (this client does not support GQL).
 //
-// An empty kind means to return all entities, including entities created and
-// managed by other App Engine features, and is called a kindless query.
-// Kindless queries cannot include filters or sort orders on property values.
+// An empty kind creates a kindless query that matches all entities across
+// kinds. Kindless queries cannot include filters or sort orders on property
+// values.
+//
+// A [Query] is immutable. Every builder method returns a new *Query, so callers
+// must capture the returned value. Builder validation errors are deferred and
+// returned when the query is executed.
 func NewQuery(kind string) *Query {
 	return &Query{
 		kind:  kind,
@@ -244,7 +255,13 @@ func NewQuery(kind string) *Query {
 	}
 }
 
-// Query represents a datastore query.
+// Query represents a Datastore query.
+//
+// Queries are immutable and safe for concurrent reuse across [Client.Run] and
+// [Client.GetAll] calls. Every builder method returns a new derivative *Query
+// and leaves the receiver unchanged, so callers must capture the return value.
+// Invalid arguments to builder methods are deferred and surfaced when the query
+// is executed.
 type Query struct {
 	kind       string
 	ancestor   *Key
@@ -278,6 +295,10 @@ func (q *Query) clone() *Query {
 
 // Ancestor returns a derivative query with an ancestor filter.
 // The ancestor should not be nil.
+//
+// Ancestor does not inherit ancestor.Namespace. For namespaced ancestors, also
+// call [Query.Namespace] with ancestor.Namespace, or Datastore will reject the
+// query.
 func (q *Query) Ancestor(ancestor *Key) *Query {
 	q = q.clone()
 	if ancestor == nil {
@@ -288,9 +309,13 @@ func (q *Query) Ancestor(ancestor *Key) *Query {
 	return q
 }
 
-// EventualConsistency returns a derivative query that returns eventually
+// EventualConsistency returns a derivative query that requests eventually
 // consistent results.
-// It only has an effect on ancestor queries.
+//
+// In Firestore in Datastore mode, all queries default to strong consistency,
+// and EventualConsistency opts any query (ancestor or non-ancestor) into
+// eventual consistency. It cannot be combined with [Query.Transaction] or a
+// client-level [ReadTime] option.
 func (q *Query) EventualConsistency() *Query {
 	q = q.clone()
 	q.eventual = true
@@ -301,7 +326,7 @@ func (q *Query) EventualConsistency() *Query {
 // namespace.
 //
 // A namespace may be used to partition data for multi-tenant applications.
-// For details, see https://cloud.google.com/datastore/docs/concepts/multitenancy.
+// For details, see https://docs.cloud.google.com/datastore/docs/concepts/multitenancy.
 func (q *Query) Namespace(ns string) *Query {
 	q = q.clone()
 	q.namespace = ns
@@ -311,21 +336,21 @@ func (q *Query) Namespace(ns string) *Query {
 // Transaction returns a derivative query that is associated with the given
 // transaction.
 //
-// All reads performed as part of the transaction will come from a single
-// consistent snapshot. Furthermore, if the transaction is set to a
-// serializable isolation level, another transaction cannot concurrently modify
-// the data that is read or modified by this transaction.
+// All reads performed as part of the transaction come from a single consistent
+// snapshot. Transaction cannot be combined with [Query.EventualConsistency] or
+// a client-level [ReadTime] option.
 func (q *Query) Transaction(t *Transaction) *Query {
 	q = q.clone()
 	q.trans = t
 	return q
 }
 
-// FilterEntity returns a query with provided filter.
+// FilterEntity returns a derivative query with the provided [EntityFilter].
 //
-// Filter can be a single field comparison or a composite filter
-// AndFilter and OrFilter are supported composite filters
-// Filters in multiple calls are joined together by AND
+// The filter may be a single [PropertyFilter] or a composite [AndFilter] or
+// [OrFilter]. Prefer FilterEntity or [Query.FilterField] over the deprecated
+// [Query.Filter] method. Multiple calls are combined with AND. The filter and
+// any nested composite elements must be non-nil.
 func (q *Query) FilterEntity(ef EntityFilter) *Query {
 	q = q.clone()
 	vf, err := ef.toValidFilter()
@@ -339,8 +364,8 @@ func (q *Query) FilterEntity(ef EntityFilter) *Query {
 
 // Filter returns a derivative query with a field-based filter.
 //
-// Deprecated: Use the FilterField method instead, which supports the same
-// set of operations (and more).
+// Deprecated: Use [Query.FilterField] or [Query.FilterEntity] instead, which
+// support the same operations as well as "in", "not-in", and composite filters.
 //
 // The filterStr argument must be a field name followed by optional space,
 // followed by an operator, one of ">", "<", ">=", "<=", "=", and "!=".
@@ -361,16 +386,23 @@ func (q *Query) Filter(filterStr string, value interface{}) *Query {
 	return q.FilterField(f, op, value)
 }
 
-// FilterField returns a derivative query with a field-based filter.
-// The operation parameter takes the following strings: ">", "<", ">=", "<=",
-// "=", "!=", "in", and "not-in".
-// Fields are compared against the provided value using the operator.
-// Multiple filters are AND'ed together.
-// Field names which contain spaces, quote marks, or operator characters
-// should be passed as quoted Go string literals as returned by strconv.Quote
-// or the fmt package's %q verb.
-// For "in" and "not-in" operator, use []interface{} as value. For instance
-// query.FilterField("Month", "in", []interface{}{1, 2, 3, 4})
+// FilterField returns a derivative query with a field-based filter. Prefer
+// FilterField or [Query.FilterEntity] over the deprecated [Query.Filter].
+//
+// The operator parameter is case-sensitive and must be one of ">", "<", ">=",
+// "<=", "=", "!=", "in", or "not-in". Multiple filters are combined with AND.
+// Field names containing spaces, quote marks, or operator characters should be
+// passed as quoted Go string literals as returned by strconv.Quote or fmt's %q
+// verb.
+//
+// For "in" and "not-in", value must be []interface{} (not a typed slice such as
+// []string or []int), for example:
+//
+//	q = q.FilterField("Month", "in", []interface{}{1, 2, 3, 4})
+//
+// Value must be a supported built-in primitive, [*Key], time.Time, [GeoPoint],
+// or nil. Custom defined primitive types (such as "type Status string") are
+// rejected.
 func (q *Query) FilterField(fieldName, operator string, value interface{}) *Query {
 	return q.FilterEntity(PropertyFilter{
 		FieldName: fieldName,
@@ -419,8 +451,15 @@ func unquote(s string) (string, error) {
 	return strconv.Unquote(s)
 }
 
-// Project returns a derivative query that yields only the given fields. It
-// cannot be used with KeysOnly.
+// Project returns a derivative query that yields only the given fields from
+// Datastore indexes. It cannot be used with [Query.KeysOnly].
+//
+// Entities missing any projected field (or with an unindexed projected field)
+// are excluded from results. Unprojected struct fields remain zero-valued, so
+// do not save projected structs back with [Client.Put]. Projected timestamps
+// are returned as raw int64 microsecond values when loaded into a
+// [PropertyList] or [PropertyLoadSaver]. Load into a Go struct to decode them
+// as time.Time.
 func (q *Query) Project(fieldNames ...string) *Query {
 	q = q.clone()
 	q.projection = slices.Clone(fieldNames)
@@ -428,8 +467,9 @@ func (q *Query) Project(fieldNames ...string) *Query {
 }
 
 // Distinct returns a derivative query that yields de-duplicated entities with
-// respect to the set of projected fields. It is only used for projection
-// queries. Distinct cannot be used with DistinctOn.
+// respect to the set of projected fields. It requires [Query.Project] and is
+// silently ignored if Project is not called. Distinct cannot be used with
+// [Query.DistinctOn].
 func (q *Query) Distinct() *Query {
 	q = q.clone()
 	q.distinct = true
@@ -437,9 +477,10 @@ func (q *Query) Distinct() *Query {
 }
 
 // DistinctOn returns a derivative query that yields de-duplicated entities with
-// respect to the set of the specified fields. It is only used for projection
-// queries. The field list should be a subset of the projected field list.
-// DistinctOn cannot be used with Distinct.
+// respect to the set of the specified fields. It requires [Query.Project] and
+// is silently ignored if Project is not called. The field list should be a
+// subset of the projected fields. DistinctOn cannot be used with
+// [Query.Distinct].
 func (q *Query) DistinctOn(fieldNames ...string) *Query {
 	q = q.clone()
 	q.distinctOn = fieldNames
@@ -447,7 +488,11 @@ func (q *Query) DistinctOn(fieldNames ...string) *Query {
 }
 
 // KeysOnly returns a derivative query that yields only keys, not keys and
-// entities. It cannot be used with projection queries.
+// entities. It cannot be used with [Query.Project].
+//
+// With KeysOnly, [Client.GetAll] ignores its dst argument (nil is valid) and
+// returns matching keys in its first return value, and [Iterator.Next] skips
+// unmarshaling into dst.
 func (q *Query) KeysOnly() *Query {
 	q = q.clone()
 	q.keysOnly = true
@@ -466,8 +511,12 @@ func (q *Query) Limit(limit int) *Query {
 	return q
 }
 
-// Offset returns a derivative query that has an offset of how many keys to
-// skip over before returning results. A negative value is invalid.
+// Offset returns a derivative query that skips the specified number of results
+// before returning entities. A negative value is invalid.
+//
+// Datastore still scans and bills skipped entities as small read operations,
+// adding latency proportional to offset. Prefer cursors ([Iterator.Cursor] with
+// [Query.Start]) for pagination.
 func (q *Query) Offset(offset int) *Query {
 	q = q.clone()
 	if offset < 0 {
@@ -588,14 +637,16 @@ func (q *Query) toProto() (*pb.Query, error) {
 	return dst, nil
 }
 
-// Count returns the number of results for the given query.
+// Count returns the number of results for the given query by executing a
+// keys-only (or projection) scan across all matching entities.
 //
-// The running time and number of API calls made by Count scale linearly with
-// the sum of the query's offset and limit. Unless the result count is
-// expected to be small, it is best to specify a limit; otherwise Count will
-// continue until it finishes counting or the provided context expires.
+// Because Count pages through every matching result client-side, its latency,
+// RPC count, and read cost scale linearly with the total number of matched and
+// skipped entities. Unless the result count is expected to be small, specify a
+// limit or use server-side aggregation instead.
 //
-// Deprecated. Use Client.RunAggregationQuery() instead.
+// Deprecated: Use [Query.NewAggregationQuery] with [AggregationQuery.WithCount]
+// and [Client.RunAggregationQuery] instead.
 func (c *Client) Count(ctx context.Context, q *Query) (n int, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/datastore.Query.Count")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -630,15 +681,23 @@ type RunOption interface {
 	apply(*runQuerySettings) error
 }
 
-// ExplainOptions is explain options for the query.
+// ExplainOptions configures query explain metrics for [Client.RunWithOptions],
+// [Client.GetAllWithOptions], and [Client.RunAggregationQueryWithOptions].
 //
-// Query Explain feature is still in preview and not yet publicly available.
-// Pre-GA features might have limited support and can change at any time.
+// With [Client.RunWithOptions], [Iterator.ExplainMetrics] is nil until the
+// iterator is drained to [iterator.Done]. When Analyze is false, call
+// [Iterator.Next] with a nil dst once (which returns [iterator.Done]) to
+// populate PlanSummary. When Analyze is true, iterate until [iterator.Done] to
+// populate both PlanSummary and ExecutionStats.
+//
+// With [Client.GetAllWithOptions], a valid non-nil pointer-to-slice dst is
+// still required for non-keys-only queries even when Analyze is false.
 type ExplainOptions struct {
-	// When false (the default), the query will be planned, returning only
-	// metrics from the planning stages.
-	// When true, the query will be planned and executed, returning the full
-	// query results along with both planning and execution stage metrics.
+	// Analyze controls whether the query is executed in addition to planned.
+	// When false (the default), the query is only planned and returns only
+	// PlanSummary without executing the query or returning results.
+	// When true, the query is planned and executed, returning results along
+	// with both PlanSummary and ExecutionStats.
 	Analyze bool
 }
 
@@ -684,37 +743,23 @@ type ExplainMetrics struct {
 
 // PlanSummary represents planning phase information for the query.
 type PlanSummary struct {
-	// The indexes selected for the query. For example:
-	//
-	//	[
-	//	  {"query_scope": "Collection", "properties": "(foo ASC, __name__ ASC)"},
-	//	  {"query_scope": "Collection", "properties": "(bar ASC, __name__ ASC)"}
-	//	]
+	// IndexesUsed contains the indexes selected for the query. Each entry
+	// describes an index with fields such as "query_scope" and "properties".
 	IndexesUsed []*map[string]interface{}
 }
 
 // ExecutionStats represents execution statistics for the query.
 type ExecutionStats struct {
-	// Total number of results returned, including documents, projections,
-	// aggregation results, keys.
+	// ResultsReturned is the total number of results returned, including
+	// entities, projections, aggregation results, and keys.
 	ResultsReturned int64
-	// Total time to execute the query in the backend.
+	// ExecutionDuration is the total time to execute the query in the backend.
 	ExecutionDuration *time.Duration
-	// Total billable read operations.
+	// ReadOperations is the total billable read operations.
 	ReadOperations int64
-	// Debugging statistics from the execution of the query. Note that the
-	// debugging stats are subject to change as Firestore evolves. It could
-	// include:
-	//
-	//	{
-	//	  "indexes_entries_scanned": "1000",
-	//	  "documents_scanned": "20",
-	//	  "billing_details" : {
-	//	     "documents_billable": "20",
-	//	     "index_entries_billable": "1000",
-	//	     "min_query_cost": "0"
-	//	  }
-	//	}
+	// DebugStats contains backend debugging statistics from query execution,
+	// such as scanned index entries and billing details. The keys and format
+	// are subject to change as Datastore evolves.
 	DebugStats *map[string]interface{}
 }
 
@@ -739,13 +784,13 @@ type GetAllWithOptionsResult struct {
 // The keys returned by GetAll will be in a 1-1 correspondence with the entities
 // added to dst.
 //
-// If q is a “keys-only” query, GetAll ignores dst and only returns the keys.
+// If q is a "keys-only" query, GetAll ignores dst (nil is valid) and only
+// returns the keys.
 //
 // The running time and number of API calls made by GetAll scale linearly with
-// with the sum of the query's offset and limit. Unless the result count is
-// expected to be small, it is best to specify a limit; otherwise GetAll will
-// continue until it finishes collecting results or the provided context
-// expires.
+// the sum of the query's offset and limit. Unless the result count is expected
+// to be small, it is best to specify a limit. Otherwise GetAll continues until
+// it finishes collecting results or the provided context expires.
 func (c *Client) GetAll(ctx context.Context, q *Query, dst interface{}) (keys []*Key, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/datastore.Query.GetAll")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -754,7 +799,11 @@ func (c *Client) GetAll(ctx context.Context, q *Query, dst interface{}) (keys []
 	return res.Keys, err
 }
 
-// GetAllWithOptions is similar to GetAll but runs the query with provided options
+// GetAllWithOptions is similar to [Client.GetAll] but runs the query with the
+// provided [RunOption] values (such as [ExplainOptions]).
+//
+// For non-keys-only queries, dst must still be a valid non-nil pointer to a
+// slice even when [ExplainOptions] has Analyze set to false.
 func (c *Client) GetAllWithOptions(ctx context.Context, q *Query, dst interface{}, opts ...RunOption) (res GetAllWithOptionsResult, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/datastore.Query.GetAllWithOptions")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -824,14 +873,24 @@ func (c *Client) GetAllWithOptions(ctx context.Context, q *Query, dst interface{
 	return res, c.processFieldMismatchError(errFieldMismatch)
 }
 
-// Run runs the given query in the given context
+// Run prepares an [Iterator] for the given query in ctx.
+//
+// Run is lazy and does not issue an RPC until [Iterator.Next] (or
+// [Iterator.Cursor] on a query with a positive offset) is called. The returned
+// [Iterator] is not safe for concurrent use and reuses ctx for all subsequent
+// batch fetches across pages.
 func (c *Client) Run(ctx context.Context, q *Query) (it *Iterator) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/datastore.Query.Run")
 	defer func() { trace.EndSpan(ctx, it.err) }()
 	return c.run(ctx, q)
 }
 
-// RunWithOptions runs the given query in the given context with the provided options
+// RunWithOptions is similar to [Client.Run] but applies the provided
+// [RunOption] values (such as [ExplainOptions]).
+//
+// RunWithOptions is lazy. When [ExplainOptions] is provided,
+// [Iterator.ExplainMetrics] remains nil until the iterator is drained to
+// [iterator.Done] (call [Iterator.Next] with nil once when Analyze is false).
 func (c *Client) RunWithOptions(ctx context.Context, q *Query, opts ...RunOption) (it *Iterator) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/datastore.Query.RunWithOptions")
 	defer func() { trace.EndSpan(ctx, it.err) }()
@@ -881,7 +940,10 @@ func (c *Client) run(ctx context.Context, q *Query, opts ...RunOption) *Iterator
 	return t
 }
 
-// RunAggregationQuery gets aggregation query (e.g. COUNT) results from the service.
+// RunAggregationQuery executes aq and returns its [AggregationResult].
+//
+// Each value in the returned map has concrete type *datastorepb.Value (from
+// cloud.google.com/go/datastore/apiv1/datastorepb).
 func (c *Client) RunAggregationQuery(ctx context.Context, aq *AggregationQuery) (ar AggregationResult, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/datastore.Query.RunAggregationQuery")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -889,7 +951,10 @@ func (c *Client) RunAggregationQuery(ctx context.Context, aq *AggregationQuery) 
 	return aro.Result, err
 }
 
-// RunAggregationQueryWithOptions runs aggregation query (e.g. COUNT) with provided options and returns results from the service.
+// RunAggregationQueryWithOptions executes aq with the provided [RunOption]
+// values (such as [ExplainOptions]) and returns the aggregation result and any
+// explain metrics. When [ExplainOptions] has Analyze set to false, Result is
+// nil and only ExplainMetrics.PlanSummary is populated.
 func (c *Client) RunAggregationQueryWithOptions(ctx context.Context, aq *AggregationQuery, opts ...RunOption) (ar AggregationWithOptionsResult, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/datastore.Query.RunAggregationQueryWithOptions")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -1020,9 +1085,11 @@ func parseQueryReadOptions(eventual bool, t *Transaction, clientReadSettings *re
 	return nil, nil
 }
 
-// Iterator is the result of running a query.
+// Iterator is the result of running a query via [Client.Run] or
+// [Client.RunWithOptions].
 //
-// It is not safe for concurrent use.
+// It is not safe for concurrent use, and it reuses the context passed to
+// [Client.Run] or [Client.RunWithOptions] for every batch RPC across pages.
 type Iterator struct {
 	ctx    context.Context
 	client *Client
@@ -1050,7 +1117,10 @@ type Iterator struct {
 	// entityCursor is the compiled cursor of the next result.
 	entityCursor []byte
 
-	// Query explain metrics. This is only present when ExplainOptions is used.
+	// ExplainMetrics holds query explain metrics when [ExplainOptions] is
+	// passed to [Client.RunWithOptions]. It is populated only after the
+	// iterator has been drained to [iterator.Done] (call [Iterator.Next] with
+	// nil once when Analyze is false).
 	ExplainMetrics *ExplainMetrics
 
 	// trans records the transaction in which the query was run
@@ -1061,11 +1131,15 @@ type Iterator struct {
 }
 
 // Next returns the key of the next result. When there are no more results,
-// iterator.Done is returned as the error.
+// [iterator.Done] (from google.golang.org/api/iterator) is returned as the
+// error.
 //
-// If the query is not keys only and dst is non-nil, it also loads the entity
-// stored for that key into the struct pointer or PropertyLoadSaver dst, with
-// the same semantics and possible errors as for the Get function.
+// If the query is not keys-only and dst is non-nil, Next loads the entity into
+// the struct pointer or [PropertyLoadSaver] dst with the same semantics as
+// [Client.Get]. Passing a nil dst skips entity unmarshaling even for
+// non-keys-only queries. If loading returns [*ErrFieldMismatch], matching
+// fields are still populated, the entity's key is returned, and the iterator
+// advances normally so subsequent Next calls continue iterating.
 func (t *Iterator) Next(dst interface{}) (k *Key, err error) {
 	k, e, err := t.next()
 	if err != nil {
@@ -1243,7 +1317,13 @@ func fromPbExecutionStats(pbstats *pb.ExecutionStats) *ExecutionStats {
 	return executionStats
 }
 
-// Cursor returns a cursor for the iterator's current location.
+// Cursor returns a [Cursor] for the iterator's current position.
+//
+// After [Iterator.Next] returns an entity, Cursor points immediately after that
+// entity so [Query.Start] resumes with the next result. Cursor may also be
+// called after [Iterator.Next] returns [iterator.Done] to obtain the end cursor
+// of the final page. On a query with a positive [Query.Offset], calling Cursor
+// before Next issues RPCs to skip the offset first.
 func (t *Iterator) Cursor() (c Cursor, err error) {
 	ctx := trace.StartSpan(t.ctx, "cloud.google.com/go/datastore.Query.Cursor")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -1294,7 +1374,7 @@ func DecodeCursor(s string) (Cursor, error) {
 	return Cursor{b}, nil
 }
 
-// NewAggregationQuery returns an AggregationQuery with this query as its
+// NewAggregationQuery returns a new mutable [AggregationQuery] with q as its
 // base query.
 func (q *Query) NewAggregationQuery() *AggregationQuery {
 	return &AggregationQuery{
@@ -1303,15 +1383,22 @@ func (q *Query) NewAggregationQuery() *AggregationQuery {
 	}
 }
 
-// AggregationQuery allows for generating aggregation results of an underlying
-// basic query. A single AggregationQuery can contain multiple aggregations.
+// AggregationQuery computes server-side aggregations (count, sum, average) over
+// an underlying [Query].
+//
+// Unlike [Query], AggregationQuery is mutated in place by
+// [AggregationQuery.WithCount], [AggregationQuery.WithSum], and
+// [AggregationQuery.WithAvg], and is not safe for concurrent use.
 type AggregationQuery struct {
 	query              *Query                             // query contains a reference pointer to the underlying structured query.
 	aggregationQueries []*pb.AggregationQuery_Aggregation // aggregateQueries contains all of the queries for this request.
 }
 
-// WithCount specifies that the aggregation query provide a count of results
-// returned by the underlying Query.
+// WithCount adds a count aggregation to aq in place and returns aq.
+//
+// The alias is used as the key in [AggregationResult]. If alias is empty, the
+// client defaults it to "count_<kind>" (unlike [AggregationQuery.WithSum] and
+// [AggregationQuery.WithAvg], which let Datastore generate "property_1", etc.).
 func (aq *AggregationQuery) WithCount(alias string) *AggregationQuery {
 	if alias == "" {
 		alias = fmt.Sprintf("%s_%s", "count", aq.query.kind)
@@ -1327,11 +1414,11 @@ func (aq *AggregationQuery) WithCount(alias string) *AggregationQuery {
 	return aq
 }
 
-// WithSum specifies that the aggregation query should provide a sum of the values
-// of the provided field in the results returned by the underlying Query.
-// The alias argument can be empty or a valid Datastore entity property name. It can be used
-// as key in the AggregationResult to get the sum value. If alias is empty, Datastore
-// will autogenerate a key.
+// WithSum adds a sum aggregation over fieldName to aq in place and returns aq.
+//
+// The alias can be empty or a valid Datastore property name, and is used as the
+// key in [AggregationResult] to retrieve the sum value. If alias is empty,
+// Datastore generates a key such as "property_1".
 func (aq *AggregationQuery) WithSum(fieldName string, alias string) *AggregationQuery {
 	aqpb := &pb.AggregationQuery_Aggregation{
 		Alias: alias,
@@ -1349,11 +1436,13 @@ func (aq *AggregationQuery) WithSum(fieldName string, alias string) *Aggregation
 	return aq
 }
 
-// WithAvg specifies that the aggregation query should provide an average of the values
-// of the provided field in the results returned by the underlying Query.
-// The alias argument can be empty or a valid Datastore entity property name. It can be used
-// as key in the AggregationResult to get the sum value. If alias is empty, Datastore
-// will autogenerate a key.
+// WithAvg adds an average aggregation over fieldName to aq in place and
+// returns aq.
+//
+// The alias can be empty or a valid Datastore property name, and is used as the
+// key in [AggregationResult] to retrieve the average value. If alias is empty,
+// Datastore generates a key such as "property_1". If zero entities match, the
+// returned value is a NullValue.
 func (aq *AggregationQuery) WithAvg(fieldName string, alias string) *AggregationQuery {
 	aqpb := &pb.AggregationQuery_Aggregation{
 		Alias: alias,
@@ -1371,7 +1460,13 @@ func (aq *AggregationQuery) WithAvg(fieldName string, alias string) *Aggregation
 	return aq
 }
 
-// AggregationResult contains the results of an aggregation query.
+// AggregationResult maps each aggregation alias to its result value.
+//
+// Each map value has concrete type *datastorepb.Value (from
+// cloud.google.com/go/datastore/apiv1/datastorepb). Type-assert the entry to
+// *datastorepb.Value and call GetIntegerValue() for count or integer sum, or
+// GetDoubleValue() for average or floating-point sum. Average over zero
+// matching entities returns a NullValue.
 type AggregationResult map[string]interface{}
 
 // AggregationWithOptionsResult contains the results of an aggregation query run with options.
