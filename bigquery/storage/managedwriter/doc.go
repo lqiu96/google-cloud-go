@@ -14,7 +14,7 @@
 
 /*
 Package managedwriter provides a thick client around the BigQuery storage API's BigQueryWriteClient.
-More information about this new write client may also be found in the public documentation: https://cloud.google.com/bigquery/docs/write-api
+More information about this write client can be found in the public documentation: https://docs.cloud.google.com/bigquery/docs/write-api-grpc
 
 Currently, this client targets the BigQueryWriteClient present in the v1 endpoint, and is intended as a more
 feature-rich successor to the classic BigQuery streaming interface, which is presented as the Inserter abstraction
@@ -23,13 +23,15 @@ methods.
 
 # Creating a Client
 
-To start working with this package, create a client:
+To start working with this package, create a client with a long-lived context and
+close it when finished:
 
 	ctx := context.Background()
 	client, err := managedwriter.NewClient(ctx, projectID)
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 
 # Defining the Protocol Buffer Schema
 
@@ -40,10 +42,16 @@ This is communicated using a DescriptorProto message, defined within the protoco
 buffer libraries: https://pkg.go.dev/google.golang.org/protobuf/types/descriptorpb#DescriptorProto
 
 More information about protocol buffers can be found in the proto2 language guide:
-https://developers.google.com/protocol-buffers/docs/proto
+https://protobuf.dev/programming-guides/proto2/
 
 Details about data type conversions between BigQuery and protocol buffers can be
-found in the public documentation: https://cloud.google.com/bigquery/docs/write-api#data_type_conversions
+found in the public documentation:
+https://docs.cloud.google.com/bigquery/docs/supported-data-types#supported_protocol_buffer_data_types
+
+Note that well-known types such as google.protobuf.Timestamp are not supported
+directly for BigQuery TIMESTAMP columns. Encode BigQuery TIMESTAMP fields as
+int64 epoch microseconds (or RFC 3339 strings) as described in the supported
+data types documentation above.
 
 For cases where the protocol buffer is compiled from a static ".proto" definition,
 this process is straightforward.  Instantiate an example message, then convert the
@@ -52,9 +60,10 @@ descriptor into a descriptor proto:
 	m := &myprotopackage.MyCompiledMessage{}
 	descriptorProto := protodesc.ToDescriptorProto(m.ProtoReflect().Descriptor())
 
-If the message uses advanced protocol buffer features like nested messages/groups,
-or enums, the cloud.google.com/go/bigquery/storage/managedwriter/adapt subpackage
-contains functionality to normalize the descriptor into a self-contained definition:
+If the message uses nested messages, groups, or enums, you must normalize the
+descriptor into a self-contained definition using adapt.NormalizeDescriptor from
+the cloud.google.com/go/bigquery/storage/managedwriter/adapt subpackage rather
+than protodesc.ToDescriptorProto alone:
 
 	m := &myprotopackage.MyCompiledMessage{}
 	descriptorProto, err := adapt.NormalizeDescriptor(m.ProtoReflect().Descriptor())
@@ -67,35 +76,41 @@ a BigQuery table's schema directly.
 
 # Constructing a ManagedStream
 
-The ManagedStream handles management of the underlying write connection to the BigQuery
+The [ManagedStream] handles management of the underlying write connection to the BigQuery
 Storage service.  You can either create a write session explicitly and pass it in, or
 create the write stream while setting up the ManagedStream.
+
+A [ManagedStream] is safe for concurrent [ManagedStream.AppendRows] calls from
+multiple goroutines (with sends synchronized on the underlying connection). Call
+[ManagedStream.Close] when finished writing to release connection resources.
 
 It's easiest to register the protocol buffer descriptor you'll be using to send data when
 setting up the managed stream using the WithSchemaDescriptor option, though you can also
 set/change the schema as part of an append request once the ManagedStream is created.
 
-	// Create a ManagedStream using an explicit stream identifer, either a default
+	// Create a ManagedStream using an explicit stream identifier, either a default
 	// stream or one explicitly created by CreateWriteStream.
 	managedStream, err := client.NewManagedStream(ctx,
-		WithStreamName(streamName),
-		WithSchemaDescriptor(descriptorProto))
+		managedwriter.WithStreamName(streamName),
+		managedwriter.WithSchemaDescriptor(descriptorProto))
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer managedStream.Close()
 
 In addition, NewManagedStream can create new streams implicitly:
 
 	// Alternately, allow the ManagedStream to handle stream construction by supplying
 	// additional options.
 	tableName := fmt.Sprintf("projects/%s/datasets/%s/tables/%s", myProject, myDataset, myTable)
-	manageStream, err := client.NewManagedStream(ctx,
-		WithDestinationTable(tableName),
-		WithType(managedwriter.BufferedStream),
-		WithSchemaDescriptor(descriptorProto))
+	managedStream, err := client.NewManagedStream(ctx,
+		managedwriter.WithDestinationTable(tableName),
+		managedwriter.WithType(managedwriter.BufferedStream),
+		managedwriter.WithSchemaDescriptor(descriptorProto))
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer managedStream.Close()
 
 # Writing Data
 
@@ -103,41 +118,47 @@ Use the AppendRows function to write one or more serialized proto messages to a 
 can choose to specify an offset in the stream to handle de-duplication for user-created streams,
 but a "default" stream neither accepts nor reports offsets.
 
+Each AppendRows request (serialized rows plus request overhead) must be under 10 MB,
+or the service rejects it with INVALID_ARGUMENT. Batch rows accordingly.
+
 AppendRows returns a future-like object that blocks until the write is successful or yields
 an error.
 
-		// Define a couple of messages.
-		mesgs := []*myprotopackage.MyCompiledMessage{
-			{
-				UserName: proto.String("johndoe"),
-				EmailAddress: proto.String("jd@mycompany.mydomain",
-				FavoriteNumbers: []proto.Int64{1,42,12345},
-			},
-			{
-				UserName: proto.String("janesmith"),
-				EmailAddress: proto.String("smith@othercompany.otherdomain",
-				FavoriteNumbers: []proto.Int64{1,3,5,7,9},
-			},
-		}
+	// Define a couple of messages.
+	mesgs := []*myprotopackage.MyCompiledMessage{
+		{
+			UserName:        proto.String("johndoe"),
+			EmailAddress:    proto.String("jd@mycompany.mydomain"),
+			FavoriteNumbers: []int64{1, 42, 12345},
+		},
+		{
+			UserName:        proto.String("janesmith"),
+			EmailAddress:    proto.String("smith@othercompany.otherdomain"),
+			FavoriteNumbers: []int64{1, 3, 5, 7, 9},
+		},
+	}
 
-		// Encode the messages into binary format.
-		encoded := make([][]byte, len(mesgs))
-		for k, v := range mesgs{
-			b, err := proto.Marshal(v)
-			if err != nil {
-				// TODO: Handle error.
-			}
-			encoded[k] = b
-	 	}
-
-		// Send the rows to the service, and specify an offset for managing deduplication.
-		result, err := managedStream.AppendRows(ctx, encoded, WithOffset(0))
-
-		// Block until the write is complete and return the result.
-		returnedOffset, err := result.GetResult(ctx)
+	// Encode the messages into binary format.
+	encoded := make([][]byte, len(mesgs))
+	for k, v := range mesgs {
+		b, err := proto.Marshal(v)
 		if err != nil {
 			// TODO: Handle error.
 		}
+		encoded[k] = b
+	}
+
+	// Send the rows to the service, and specify an offset for managing deduplication.
+	result, err := managedStream.AppendRows(ctx, encoded, managedwriter.WithOffset(0))
+	if err != nil {
+		// TODO: Handle error.
+	}
+
+	// Block until the write is complete and return the result.
+	returnedOffset, err := result.GetResult(ctx)
+	if err != nil {
+		// TODO: Handle error.
+	}
 
 # Buffered Stream Management
 
@@ -164,7 +185,7 @@ have been finalized, meaning they'll no longer allow further data writes.
 		Parent: parentName,
 		WriteStreams: []string{managedStream.StreamName()},
 	}
-	// Using the client, we can commit data from multple streams to the same
+	// Using the client, we can commit data from multiple streams to the same
 	// table atomically.
 	resp, err := client.BatchCommitWriteStreams(ctx, req)
 
@@ -178,7 +199,7 @@ provides convenience methods for extracting structured information about errors.
 
 The BigQuery Storage API service augments applicable errors with service-specific details in
 the form of a StorageError message. The StorageError message is accessed via the ExtractProtoMessage
-method in the apierror package. Note that the StorageError messsage does not implement Go's error
+method in the apierror package. Note that the StorageError message does not implement Go's error
 interface.
 
 An example of accessing the structured error details:
@@ -188,22 +209,26 @@ An example of accessing the structured error details:
 	if err != nil {
 		if apiErr, ok := apierror.FromError(err); ok {
 			// We now have an instance of APIError, which directly exposes more specific
-			// details about multiple failure conditions include transport-level errors.
+			// details about multiple failure conditions including transport-level errors.
 			storageErr := &storagepb.StorageError{}
-			if e := apiErr.Details().ExtractProtoMessage(storageErr); e != nil {
+			if e := apiErr.Details().ExtractProtoMessage(storageErr); e == nil {
 				// storageErr now contains service-specific information about the error.
 				log.Printf("Received service-specific error code %s", storageErr.GetCode().String())
 			}
 		}
 	}
 
-This library supports the ability to retry failed append requests, but this functionality is not
-enabled by default.  You can enable it via the EnableWriteRetries option when constructing a new
-managed stream.  Use of automatic retries can impact correctness when attempting certain exactly-once
-write patterns, but is generally recommended for workloads that only need at-least-once writing.
+This library supports retrying failed append requests, but retries are disabled
+by default (opt-in). The BigQuery Storage Write API closes idle connections after
+roughly 10 minutes and drains connections periodically. Without retries enabled,
+writes over an idle or draining connection fail with io.EOF, Unavailable, or
+context deadline exceeded. Enable retries by passing true to [EnableWriteRetries]
+when constructing a [ManagedStream]. Automatic retries are generally recommended
+for at-least-once workloads (such as [DefaultStream]) and may introduce duplicate
+rows if used without offset management on explicit streams.
 
-With write retries enabled, failed writes will be automatically attempted a finite number of times
-(currently 4) if the failure is considered retriable.
+With write retries enabled, failed writes are automatically attempted a finite
+number of times if the failure is considered retriable.
 
 In support of the retry changes, the AppendResult returned as part of an append call now includes
 TotalAttempts(), which returns the number of times that specific append was enqueued to the service.
@@ -211,23 +236,25 @@ Values larger than 1 are indicative of a specific append being enqueued multiple
 
 # Usage of Contexts
 
-The underlying rpc mechanism used to transmit requests and responses between this client and
-the service uses a gRPC bidirectional streaming protocol, and the context provided when invoking
-NewClient to instantiate the client is used to maintain those background connections.
+The underlying RPC mechanism uses gRPC bidirectional streaming. Pass a long-lived
+client-lifetime context (such as context.Background()) to [NewClient], because
+that context governs background connection pools and reconnects for the lifetime
+of the client.
 
-This package also exposes context when instantiating a new writer (NewManagedStream), as well as
-allowing a per-request context when invoking the AppendRows function to send a set of rows.  If the
-context becomes invalid on the writer all subsequent AppendRows requests will be blocked.
+Pass a stream-lifetime context to [Client.NewManagedStream], not a short
+per-request timeout. If the context passed to [Client.NewManagedStream] is
+canceled or expires, the stream is permanently closed and all subsequent
+[ManagedStream.AppendRows] calls fail.
 
-Finally, there is a per-request context supplied as part of the AppendRows call on the ManagedStream
-writer itself, useful for bounding individual requests.
+Apply per-request timeouts and cancellation using the contexts passed to
+[ManagedStream.AppendRows] and [AppendResult.GetResult].
 
 # Connection Sharing (Multiplexing)
 
 Note: This feature is EXPERIMENTAL and subject to change.
 
 The BigQuery Write API enforces a limit on the number of concurrent open connections, documented
-here: https://cloud.google.com/bigquery/quotas#write-api-limits
+here: https://docs.cloud.google.com/bigquery/quotas#write-api-limits
 
 Users can now choose to enable connection sharing (multiplexing) when using ManagedStream writers
 that use default streams.  The intent of this feature is to simplify connection management for users
@@ -246,12 +273,13 @@ To enable multiplexing for writes to default streams, simply instantiate the cli
 
 	ctx := context.Background()
 	client, err := managedwriter.NewClient(ctx, projectID,
-		WithMultiplexing,
-		WithMultiplexPoolLimit(3),
+		managedwriter.WithMultiplexing(),
+		managedwriter.WithMultiplexPoolLimit(3),
 	)
 	if err != nil {
 		// TODO: Handle error.
 	}
+	defer client.Close()
 
 Special Consideration:  The gRPC architecture is capable of its own sharing of underlying HTTP/2 connections.
 For users who are sending significant traffic on multiple writers (independent of whether they're leveraging

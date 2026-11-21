@@ -26,9 +26,9 @@ import (
 	bq "google.golang.org/api/bigquery/v2"
 )
 
-// Routine represents a reference to a BigQuery routine.  There are multiple
+// Routine represents a reference to a BigQuery routine. There are multiple
 // types of routines including stored procedures and scalar user-defined functions (UDFs).
-// For more information, see the BigQuery documentation at https://cloud.google.com/bigquery/docs/
+// For more information, see https://docs.cloud.google.com/bigquery/docs/routines.
 type Routine struct {
 	ProjectID string
 	DatasetID string
@@ -46,9 +46,9 @@ func (r *Routine) toBQ() *bq.RoutineReference {
 }
 
 // Identifier returns the ID of the routine in the requested format.
+// Only [StandardSQLID] is supported. Other formats return [ErrUnknownIdentifierFormat].
 //
-// For Standard SQL format, the identifier will be quoted if the
-// ProjectID contains dash (-) characters.
+// For [StandardSQLID], ProjectID is backtick-quoted if it contains a dash (-) character.
 func (r *Routine) Identifier(f IdentifierFormat) (string, error) {
 	switch f {
 	case StandardSQLID:
@@ -61,7 +61,9 @@ func (r *Routine) Identifier(f IdentifierFormat) (string, error) {
 	}
 }
 
-// FullyQualifiedName returns an identifer for the routine in project.dataset.routine format.
+// FullyQualifiedName returns an identifier for the routine in Standard SQL
+// project.dataset.routine format (unlike [Table.FullyQualifiedName] and
+// [Model.FullyQualifiedName], which use Legacy SQL format).
 func (r *Routine) FullyQualifiedName() string {
 	s, _ := r.Identifier(StandardSQLID)
 	return s
@@ -110,7 +112,14 @@ func (r *Routine) Metadata(ctx context.Context) (rm *RoutineMetadata, err error)
 	return bqToRoutineMetadata(routine)
 }
 
-// Update modifies properties of a Routine using the API.
+// Update replaces the routine's metadata using HTTP PUT (routines.update).
+// Unlike [Table.Update], [Dataset.Update], and [Model.Update] (which patch
+// individual fields), Update requires a non-nil *[RoutineMetadataToUpdate] and
+// performs a full resource replacement. Populate all fields you want to preserve
+// (including Type, Language, Body, Arguments, and ReturnType), as omitted fields
+// are cleared or rejected. Pass etag from a prior [Routine.Metadata] call for
+// optimistic concurrency control (If-Match, failing with HTTP 412 on concurrent
+// writes), or pass "" for a blind write.
 func (r *Routine) Update(ctx context.Context, upd *RoutineMetadataToUpdate, etag string) (rm *RoutineMetadata, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/bigquery.Routine.Update")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -189,7 +198,7 @@ type RoutineMetadata struct {
 	LastModifiedTime time.Time
 	// Language of the routine, such as SQL or JAVASCRIPT.
 	Language string
-	// The list of arguments for the the routine.
+	// The list of arguments for the routine.
 	Arguments []*RoutineArgument
 
 	// Information for a remote user-defined function.
@@ -320,7 +329,7 @@ func (rm *RoutineMetadata) toBQ() (*bq.Routine, error) {
 }
 
 // RoutineArgument represents an argument supplied to a routine such as a UDF or
-// stored procedured.
+// stored procedure.
 type RoutineArgument struct {
 	// The name of this argument.  Can be absent for function return argument.
 	Name string
@@ -403,7 +412,13 @@ func routineArgumentsToBQ(in []*RoutineArgument) ([]*bq.Argument, error) {
 	return out, nil
 }
 
-// RoutineMetadataToUpdate governs updating a routine.
+// RoutineMetadataToUpdate specifies the routine definition passed to [Routine.Update].
+//
+// Because [Routine.Update] performs a full-replacement HTTP PUT, populate all fields
+// you want to preserve. Omitted fields are cleared or rejected, and remote function
+// options on existing remote routines are not preserved. Fields typed as
+// optional.String accept plain string values (not *string) and panic at runtime if
+// given another type. DeterminismLevel accepts either string or [RoutineDeterminism].
 type RoutineMetadataToUpdate struct {
 	Arguments          []*RoutineArgument
 	Description        optional.String

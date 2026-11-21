@@ -26,7 +26,10 @@ import (
 	bq "google.golang.org/api/bigquery/v2"
 )
 
-// A Table is a reference to a BigQuery table.
+// A Table is a reference to a BigQuery table. Creating a handle via [Dataset.Table]
+// does not perform a network call. Use [Table.Metadata] to check whether a table
+// exists and inspect its schema or properties. For new or high-throughput streaming
+// inserts, prefer cloud.google.com/go/bigquery/storage/managedwriter over [Table.Inserter].
 type Table struct {
 	// ProjectID, DatasetID and TableID may be omitted if the Table is the destination for a query.
 	// In this case the result will be stored in an ephemeral table.
@@ -101,7 +104,7 @@ type TableMetadata struct {
 	// Custom encryption configuration (e.g., Cloud KMS keys).
 	EncryptionConfig *EncryptionConfig
 
-	// All the fields below are read-only.
+	// The following fields are read-only.
 
 	FullID           string // An opaque ID uniquely identifying the table.
 	Type             TableType
@@ -109,16 +112,20 @@ type TableMetadata struct {
 	LastModifiedTime time.Time
 
 	// The size of the table in bytes.
-	// This does not include data that is being buffered during a streaming insert.
+	// This does not include data buffered in the legacy streaming buffer (which
+	// can take up to 90 minutes to flush to managed storage), and is 0 when
+	// fetched with [BasicMetadataView].
 	NumBytes int64
 
 	// The number of bytes in the table considered "long-term storage" for reduced
-	// billing purposes.  See https://cloud.google.com/bigquery/pricing#long-term-storage
+	// billing purposes. See https://cloud.google.com/bigquery/pricing#storage-pricing
 	// for more information.
 	NumLongTermBytes int64
 
 	// The number of rows of data in this table.
-	// This does not include data that is being buffered during a streaming insert.
+	// This does not include data buffered in the legacy streaming buffer (which
+	// can take up to 90 minutes to flush to managed storage), and is 0 when
+	// fetched with [BasicMetadataView].
 	NumRows uint64
 
 	// SnapshotDefinition contains additional information about the provenance of a
@@ -137,6 +144,8 @@ type TableMetadata struct {
 	// ETag is the ETag obtained when reading metadata. Pass it to Table.Update to
 	// ensure that the metadata hasn't changed since it was read.
 	ETag string
+
+	// The following fields can also be set when creating or updating a table.
 
 	// Defines the default collation specification of new STRING fields
 	// in the table. During table creation or update, if a STRING field is added
@@ -281,7 +290,8 @@ const (
 )
 
 // TableWriteDisposition specifies how existing data in a destination table is treated.
-// Default is WriteAppend.
+// Default is [WriteAppend] for load jobs ([LoadConfig]), and [WriteEmpty] for query
+// ([QueryConfig]) and copy ([CopyConfig]) jobs.
 type TableWriteDisposition string
 
 const (
@@ -312,7 +322,7 @@ const (
 	ViewTable TableType = "VIEW"
 	// ExternalTable is a table type describing that the table is an external
 	// table (also known as a federated data source). See more information at
-	// https://cloud.google.com/bigquery/external-data-sources.
+	// https://docs.cloud.google.com/bigquery/docs/external-data-sources.
 	ExternalTable TableType = "EXTERNAL"
 	// MaterializedView represents a managed storage table that's derived from
 	// a base table.
@@ -336,7 +346,7 @@ type MaterializedViewDefinition struct {
 	Query string
 
 	// RefreshInterval defines the maximum frequency, in millisecond precision,
-	// at which this this materialized view will be refreshed.
+	// at which this materialized view will be refreshed.
 	RefreshInterval time.Duration
 
 	// AllowNonIncrementalDefinition for materialized view definition.
@@ -414,7 +424,7 @@ type BigLakeConfiguration struct {
 	// Optional. The connection specifying the credentials to be used to read and
 	// write to external storage, such as Cloud Storage. The connection_id can
 	// have the form `{project}.{location}.{connection_id}` or
-	// `projects/{project}/locations/{location}/connections/{connection_id}".
+	// `projects/{project}/locations/{location}/connections/{connection_id}`.
 	ConnectionID string
 
 	// Optional. The fully qualified location prefix of the external folder where
@@ -708,7 +718,11 @@ func bqToEncryptionConfig(q *bq.EncryptionConfiguration) *EncryptionConfig {
 	}
 }
 
-// StreamingBuffer holds information about the streaming buffer.
+// StreamingBuffer holds information about the legacy streaming insert buffer
+// used by [Table.Inserter]. Buffered rows are excluded from [TableMetadata.NumRows]
+// and [TableMetadata.NumBytes] until flushed to managed storage. For new or
+// high-throughput streaming workloads, prefer
+// cloud.google.com/go/bigquery/storage/managedwriter.
 type StreamingBuffer struct {
 	// A lower-bound estimate of the number of bytes currently in the streaming
 	// buffer.
@@ -730,7 +744,7 @@ func (t *Table) toBQ() *bq.TableReference {
 	}
 }
 
-// IdentifierFormat represents a how certain resource identifiers such as table references
+// IdentifierFormat represents how certain resource identifiers such as table references
 // are formatted.
 type IdentifierFormat string
 
@@ -751,6 +765,12 @@ var (
 )
 
 // Identifier returns the ID of the table in the requested format.
+// Supports [LegacySQLID], [StandardSQLID], and [StorageAPIResourceID] (unlike
+// [Dataset.Identifier], [Model.Identifier], and [Routine.Identifier], which
+// do not support [StorageAPIResourceID]).
+//
+// For [StandardSQLID], Table.Identifier does not backtick-quote identifiers
+// containing dashes. Quote the returned identifier in SQL if needed.
 func (t *Table) Identifier(f IdentifierFormat) (string, error) {
 	switch f {
 	case LegacySQLID:
@@ -766,7 +786,9 @@ func (t *Table) Identifier(f IdentifierFormat) (string, error) {
 	}
 }
 
-// FullyQualifiedName returns the ID of the table in projectID:datasetID.tableID format.
+// FullyQualifiedName returns the ID of the table in Legacy SQL
+// projectID:datasetID.tableID format (unlike [Routine.FullyQualifiedName],
+// which uses Standard SQL format).
 func (t *Table) FullyQualifiedName() string {
 	s, _ := t.Identifier(LegacySQLID)
 	return s
@@ -779,7 +801,7 @@ func (t *Table) implicitTable() bool {
 
 // Create creates a table in the BigQuery service.
 // Pass in a TableMetadata value to configure the table.
-// If tm.View.Query is non-empty, the created table will be of type VIEW.
+// If tm.ViewQuery is non-empty, the created table will be of type VIEW.
 // If no ExpirationTime is specified, the table will never expire.
 // After table creation, a view can be modified only if its table was initially created
 // with a view.
@@ -907,8 +929,8 @@ type TableMetadataOption func(*tableGetCall)
 type TableMetadataView string
 
 const (
-	// BasicMetadataView populates basic table information including schema partitioning,
-	// but does not contain storage statistics like number or rows or bytes.  This is a more
+	// BasicMetadataView populates basic table information including schema and partitioning,
+	// but does not contain storage statistics like number of rows or bytes. This is a more
 	// efficient view to use for large tables or higher metadata query rates.
 	BasicMetadataView TableMetadataView = "BASIC"
 
@@ -917,7 +939,9 @@ const (
 	// in the future.
 	FullMetadataView TableMetadataView = "FULL"
 
-	// StorageStatsMetadataView includes all information from the basic view, and includes storage statistics.  It currently
+	// StorageStatsMetadataView includes all information from [BasicMetadataView]
+	// along with storage statistics such as NumRows and NumBytes. This is the
+	// default view when no [WithMetadataView] option is provided.
 	StorageStatsMetadataView TableMetadataView = "STORAGE_STATS"
 )
 
@@ -931,6 +955,11 @@ func WithMetadataView(tmv TableMetadataView) TableMetadataOption {
 }
 
 // Metadata fetches the metadata for the table.
+//
+// By default, the server returns storage statistics ([StorageStatsMetadataView]),
+// which can add latency on large tables or at high call rates. Pass
+// [WithMetadataView] with [BasicMetadataView] to skip storage-statistics
+// computation (in which case NumRows and NumBytes are 0).
 func (t *Table) Metadata(ctx context.Context, opts ...TableMetadataOption) (md *TableMetadata, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/bigquery.Table.Metadata")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -1054,7 +1083,7 @@ func (t *Table) read(ctx context.Context, pf pageFetcher) *RowIterator {
 	return newRowIterator(ctx, &rowSource{t: t}, pf)
 }
 
-// NeverExpire is a sentinel value used to remove a table'e expiration time.
+// NeverExpire is a sentinel value used to remove a table's or model's expiration time.
 var NeverExpire = time.Time{}.Add(-1)
 
 // We use this for the option pattern rather than exposing the underlying
@@ -1074,7 +1103,10 @@ func WithAutoDetectSchema(b bool) TableUpdateOption {
 	}
 }
 
-// Update modifies specific Table metadata fields.
+// Update modifies specific Table metadata fields using HTTP PATCH.
+// Only non-nil fields in tm are updated. Pass etag from a prior [Table.Metadata]
+// call for optimistic concurrency control (If-Match, failing with HTTP 412 on
+// concurrent writes), or pass "" for a blind write.
 func (t *Table) Update(ctx context.Context, tm TableMetadataToUpdate, etag string, opts ...TableUpdateOption) (md *TableMetadata, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/bigquery.Table.Update")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -1224,9 +1256,9 @@ func (tm *TableMetadataToUpdate) toBQ() (*bq.Table, error) {
 
 // validExpiration ensures a specified time is either the sentinel NeverExpire,
 // the zero value, or within the defined range of UnixNano. Internal
-// represetations of expiration times are based upon Time.UnixNano. Any time
+// representations of expiration times are based upon Time.UnixNano. Any time
 // before 1678 or after 2262 cannot be represented by an int64 and is therefore
-// undefined and invalid. See https://godoc.org/time#Time.UnixNano.
+// undefined and invalid. See https://pkg.go.dev/time#Time.UnixNano.
 func validExpiration(t time.Time) bool {
 	return t == NeverExpire || t.IsZero() || time.Unix(0, t.UnixNano()).Equal(t)
 }
@@ -1238,8 +1270,12 @@ func invalidTimeError(t time.Time) error {
 		"Valid expiration times are after 1678 and before 2262", t)
 }
 
-// TableMetadataToUpdate is used when updating a table's metadata.
-// Only non-nil fields will be updated.
+// TableMetadataToUpdate is used when updating a table's metadata via [Table.Update].
+// Only non-nil fields are updated.
+//
+// Fields typed as optional.String or optional.Bool accept plain values (such as
+// string or bool, not pointers) and panic at runtime if given another type.
+// Use SetLabel and DeleteLabel to add, modify, or remove labels.
 type TableMetadataToUpdate struct {
 	// The user-friendly description of this table.
 	Description optional.String
@@ -1248,19 +1284,23 @@ type TableMetadataToUpdate struct {
 	Name optional.String
 
 	// The table's schema.
-	// When updating a schema, you can add columns but not remove them.
+	// Schema updates replace the full schema definition, so pass all existing
+	// columns along with any additions (not a delta). You can add columns or
+	// relax modes, but not remove columns.
 	Schema Schema
 
-	// The table's clustering configuration.
-	// For more information on how modifying clustering affects the table, see:
-	// https://cloud.google.com/bigquery/docs/creating-clustered-tables#modifying-cluster-spec
+	// The table's clustering configuration, replacing any existing specification.
+	// Pass &Clustering{} (empty Fields) to remove clustering from the table.
+	// For more information on how modifying clustering affects the table, see
+	// https://docs.cloud.google.com/bigquery/docs/manage-clustered-tables#modifying-cluster-spec.
 	Clustering *Clustering
 
 	// The table's encryption configuration.
 	EncryptionConfig *EncryptionConfig
 
 	// The time when this table expires. To remove a table's expiration,
-	// set ExpirationTime to NeverExpire. The zero value is ignored.
+	// set ExpirationTime to [NeverExpire]. The zero value is ignored.
+	// Valid expiration times are between years 1678 and 2262.
 	ExpirationTime time.Time
 
 	// ExternalDataConfig controls the definition of a table defined against
@@ -1278,10 +1318,12 @@ type TableMetadataToUpdate struct {
 	// MaterializedViewDefinition are populated.
 	MaterializedView *MaterializedViewDefinition
 
-	// TimePartitioning allows modification of certain aspects of partition
-	// configuration such as partition expiration and whether partition
-	// filtration is required at query time.  When calling Update, ensure
-	// that all mutable fields of TimePartitioning are populated.
+	// TimePartitioning allows modification of mutable partition settings such as
+	// partition expiration and whether partition filtering is required at query time.
+	// Updates replace the mutable partitioning fields, so populate every mutable
+	// field you want to preserve. An Expiration of 0 clears partition expiration,
+	// and RequirePartitionFilter is always sent. Prefer the top-level
+	// RequirePartitionFilter field to toggle partition filtering alone.
 	TimePartitioning *TimePartitioning
 
 	// RequirePartitionFilter governs whether the table enforces partition
@@ -1322,6 +1364,7 @@ type labelUpdater struct {
 }
 
 // SetLabel causes a label to be added or modified on a call to Update.
+// Do not call both SetLabel and DeleteLabel for the same key in one update.
 func (u *labelUpdater) SetLabel(name, value string) {
 	if u.setLabels == nil {
 		u.setLabels = map[string]string{}
@@ -1330,6 +1373,7 @@ func (u *labelUpdater) SetLabel(name, value string) {
 }
 
 // DeleteLabel causes a label to be deleted on a call to Update.
+// Do not call both SetLabel and DeleteLabel for the same key in one update.
 func (u *labelUpdater) DeleteLabel(name string) {
 	if u.deleteLabels == nil {
 		u.deleteLabels = map[string]bool{}

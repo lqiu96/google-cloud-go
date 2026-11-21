@@ -27,7 +27,10 @@ import (
 	"google.golang.org/api/iterator"
 )
 
-// Dataset is a reference to a BigQuery dataset.
+// Dataset is a reference to a BigQuery dataset. Creating a handle via
+// [Client.Dataset] or [Client.DatasetInProject] does not perform a network call.
+// Use [Dataset.Metadata] to check whether a dataset exists. Dataset-level access
+// is managed via [DatasetMetadata.Access] rather than an IAM method.
 type Dataset struct {
 	ProjectID string
 	DatasetID string
@@ -66,12 +69,13 @@ type DatasetMetadata struct {
 	MaxTimeTravel time.Duration
 
 	// Storage billing model to be used for all tables in the dataset.
-	// Can be set to PHYSICAL. Default is LOGICAL.
+	// Can be set to PHYSICAL. Default is LOGICAL, which may be returned as ""
+	// ([LogicalStorageBillingModel]) when unspecified by the server.
 	// Once you create a dataset with storage billing model set to physical bytes, you can't change it back to using logical bytes again.
-	// More details: https://cloud.google.com/bigquery/docs/datasets-intro#dataset_storage_billing_models
+	// More details: https://docs.cloud.google.com/bigquery/docs/datasets-intro#dataset_storage_billing_models
 	StorageBillingModel string
 
-	// These fields are read-only.
+	// The following fields are read-only.
 	CreationTime     time.Time
 	LastModifiedTime time.Time // When the dataset or any of its tables were modified.
 	FullID           string    // The full dataset ID in the form projectID:datasetID.
@@ -81,13 +85,14 @@ type DatasetMetadata struct {
 	// More information: https://cloud.google.com/resource-manager/docs/tags/tags-overview
 	Tags []*DatasetTag
 
+	// IsCaseInsensitive can be set when creating or updating a dataset.
 	// TRUE if the dataset and its table names are case-insensitive, otherwise
 	// FALSE. By default, this is FALSE, which means the dataset and its table
 	// names are case-sensitive. This field does not affect routine references.
 	IsCaseInsensitive bool
 
-	// ETag is the ETag obtained when reading metadata. Pass it to Dataset.Update to
-	// ensure that the metadata hasn't changed since it was read.
+	// ETag is read-only and holds the ETag obtained when reading metadata. Pass it
+	// to [Dataset.Update] to ensure that the metadata hasn't changed since it was read.
 	ETag string
 }
 
@@ -120,19 +125,27 @@ func bqToDatasetTag(in *bq.DatasetTags) *DatasetTag {
 	}
 }
 
-// DatasetMetadataToUpdate is used when updating a dataset's metadata.
-// Only non-nil fields will be updated.
+// DatasetMetadataToUpdate is used when updating a dataset's metadata via
+// [Dataset.Update] or [Dataset.UpdateWithOptions]. Only non-nil fields are updated.
+//
+// Fields typed as optional.String, optional.Bool, or optional.Duration accept
+// plain values (such as string, bool, or time.Duration, not pointers) and panic
+// at runtime if given another type. Use SetLabel and DeleteLabel to add, modify,
+// or remove labels.
 type DatasetMetadataToUpdate struct {
-	Description optional.String // The user-friendly description of this table.
+	Description optional.String // The user-friendly description of this dataset.
 	Name        optional.String // The user-friendly name for this dataset.
 
 	// DefaultTableExpiration is the default expiration time for new tables.
-	// If set to time.Duration(0), new tables never expire.
+	// Set to time.Duration(0) to clear the expiration so new tables never expire
+	// (unlike Table and Model updates, which use [NeverExpire]). Leave nil to
+	// leave unchanged.
 	DefaultTableExpiration optional.Duration
 
-	// DefaultTableExpiration is the default expiration time for
+	// DefaultPartitionExpiration is the default expiration time for
 	// all newly created partitioned tables.
-	// If set to time.Duration(0), new table partitions never expire.
+	// Set to time.Duration(0) to clear the expiration so new table partitions
+	// never expire. Leave nil to leave unchanged.
 	DefaultPartitionExpiration optional.Duration
 
 	// DefaultEncryptionConfig defines CMEK settings for new resources created
@@ -147,16 +160,19 @@ type DatasetMetadataToUpdate struct {
 	ExternalDatasetReference *ExternalDatasetReference
 
 	// MaxTimeTravel represents the number of hours for the max time travel for all tables
-	// in the dataset.  Durations are rounded towards zero for the nearest hourly value.
+	// in the dataset. Durations are rounded toward zero to whole hours. Set to
+	// time.Duration(0) to clear, or leave nil to leave unchanged. Non-zero durations
+	// shorter than 1 hour truncate to 0 without clearing the field.
 	MaxTimeTravel optional.Duration
 
 	// Storage billing model to be used for all tables in the dataset.
 	// Can be set to PHYSICAL. Default is LOGICAL.
 	// Once you change a dataset's storage billing model to use physical bytes, you can't change it back to using logical bytes again.
-	// More details: https://cloud.google.com/bigquery/docs/datasets-intro#dataset_storage_billing_models
+	// More details: https://docs.cloud.google.com/bigquery/docs/datasets-intro#dataset_storage_billing_models
 	StorageBillingModel optional.String
 
-	// The entire access list. It is not possible to replace individual entries.
+	// Access replaces the entire access list. Individual entries cannot be patched.
+	// Pass a non-nil empty slice ([]*AccessEntry{}) to clear all access entries.
 	Access []*AccessEntry
 
 	// TRUE if the dataset and its table names are case-insensitive, otherwise
@@ -182,9 +198,10 @@ func (c *Client) DatasetInProject(projectID, datasetID string) *Dataset {
 }
 
 // Identifier returns the ID of the dataset in the requested format.
+// Only [LegacySQLID] and [StandardSQLID] are supported. Other formats return
+// [ErrUnknownIdentifierFormat].
 //
-// For Standard SQL format, the identifier will be quoted if the
-// ProjectID contains dash (-) characters.
+// For [StandardSQLID], ProjectID is backtick-quoted if it contains a dash (-) character.
 func (d *Dataset) Identifier(f IdentifierFormat) (string, error) {
 	switch f {
 	case LegacySQLID:
@@ -294,12 +311,15 @@ func accessListToBQ(a []*AccessEntry) ([]*bq.DatasetAccess, error) {
 	return q, nil
 }
 
-// Delete deletes the dataset.  Delete will fail if the dataset is not empty.
+// Delete deletes the dataset. Delete fails if the dataset is not empty.
+// Use [Dataset.DeleteWithContents] to delete a non-empty dataset.
 func (d *Dataset) Delete(ctx context.Context) (err error) {
 	return d.deleteInternal(ctx, false)
 }
 
-// DeleteWithContents deletes the dataset, as well as contained resources.
+// DeleteWithContents permanently deletes the dataset and all tables, views,
+// models, and routines inside it. Use [Dataset.Delete] to fail safely if the
+// dataset is not empty.
 func (d *Dataset) DeleteWithContents(ctx context.Context) (err error) {
 	return d.deleteInternal(ctx, true)
 }
@@ -320,12 +340,16 @@ func (d *Dataset) deleteInternal(ctx context.Context, deleteContents bool) (err 
 }
 
 // Metadata fetches the metadata for the dataset.
+// For datasets with conditional ACL bindings, call [Dataset.MetadataWithOptions]
+// with [WithAccessPolicyVersion] set to 3 so conditional roles are returned intact.
 func (d *Dataset) Metadata(ctx context.Context) (md *DatasetMetadata, err error) {
 	return d.MetadataWithOptions(ctx)
 }
 
 // MetadataWithOptions fetches metadata for the dataset, and provides additional options for
 // controlling the request.
+// Pass [WithAccessPolicyVersion] set to 3 for datasets with conditional ACL bindings,
+// or [WithDatasetView] to fetch only metadata or only ACLs.
 func (d *Dataset) MetadataWithOptions(ctx context.Context, opts ...DatasetOption) (md *DatasetMetadata, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/bigquery.Dataset.Metadata")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -368,8 +392,8 @@ type dsCallOption struct {
 // service.
 type DatasetOption func(*dsCallOption)
 
-// WithAccessPolicyVersion is an option that enabled setting of the Access Policy Version for a request
-// where appropriate.  Valid values are 0, 1, and 3.
+// WithAccessPolicyVersion is an option that enables setting the Access Policy Version for a request
+// where appropriate. Valid values are 0, 1, and 3.
 //
 // Requests specifying an invalid value will be rejected.
 // Requests for conditional access policy binding in datasets must specify version 3.
@@ -377,12 +401,13 @@ type DatasetOption func(*dsCallOption)
 // Dataset with no conditional role bindings in access policy may specify any valid value
 // or leave the field unset.
 //
-// This field will be mapped to [IAM Policy version] (https://cloud.google.com/iam/docs/policies#versions)
-// and will be used to fetch policy from IAM. If unset or if 0 or 1 value is used for
-// dataset with conditional bindings, access entry with condition will have role string
-// appended by 'withcond' string followed by a hash value.
+// This field maps to the IAM Policy version
+// (https://docs.cloud.google.com/iam/docs/allow-policies#versions)
+// and is used to fetch policy from IAM. If unset or if 0 or 1 is used for a
+// dataset with conditional bindings, access entries with conditions have their
+// role string suffixed with 'withcond' followed by a hash value.
 //
-// Please refer https://cloud.google.com/iam/docs/troubleshooting-withcond for more details.
+// See https://docs.cloud.google.com/iam/docs/troubleshooting-withcond for more details.
 func WithAccessPolicyVersion(apv int) DatasetOption {
 	return func(o *dsCallOption) {
 		o.accessPolicyVersion = apv
@@ -480,20 +505,24 @@ func bqToDatasetMetadata(d *bq.Dataset, c *Client) (*DatasetMetadata, error) {
 	return dm, nil
 }
 
-// Update modifies specific Dataset metadata fields.
-// To perform a read-modify-write that protects against intervening reads,
-// set the etag argument to the DatasetMetadata.ETag field from the read.
-// Pass the empty string for etag for a "blind write" that will always succeed.
+// Update modifies specific Dataset metadata fields using HTTP PATCH.
+// Only non-nil fields in dm are updated. To perform a read-modify-write that
+// protects against intervening writes, pass [DatasetMetadata.ETag] from a prior
+// read as etag (sends If-Match and fails with HTTP 412 on conflict). Pass "" for
+// a blind write. To update datasets with conditional ACL bindings, call
+// [Dataset.UpdateWithOptions] with [WithAccessPolicyVersion] set to 3.
 func (d *Dataset) Update(ctx context.Context, dm DatasetMetadataToUpdate, etag string) (md *DatasetMetadata, err error) {
 	return d.UpdateWithOptions(ctx, dm, etag)
 }
 
-// UpdateWithOptions modifies specific Dataset metadata fields and
-// provides an interface for specifying additional options to the request.
+// UpdateWithOptions modifies specific Dataset metadata fields using HTTP PATCH
+// and provides options such as [WithAccessPolicyVersion] (set to 3 for
+// conditional ACL bindings) and [WithUpdateMode].
 //
-// To perform a read-modify-write that protects against intervening reads,
-// set the etag argument to the DatasetMetadata.ETag field from the read.
-// Pass the empty string for etag for a "blind write" that will always succeed.
+// Only non-nil fields in dm are updated. To perform a read-modify-write that
+// protects against intervening writes, pass [DatasetMetadata.ETag] from a prior
+// read as etag (sends If-Match and fails with HTTP 412 on conflict). Pass "" for
+// a blind write.
 func (d *Dataset) UpdateWithOptions(ctx context.Context, dm DatasetMetadataToUpdate, etag string, opts ...DatasetOption) (md *DatasetMetadata, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/bigquery.Dataset.Update")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -618,6 +647,9 @@ func (d *Dataset) Table(tableID string) *Table {
 }
 
 // Tables returns an iterator over the tables in the Dataset.
+// Yielded [Table] handles contain only resource identifiers. Call
+// [Table.Metadata] on each handle if you need fields such as schema, labels,
+// or table type.
 func (d *Dataset) Tables(ctx context.Context) *TableIterator {
 	it := &TableIterator{
 		ctx:     ctx,
@@ -706,6 +738,9 @@ func (d *Dataset) Model(modelID string) *Model {
 }
 
 // Models returns an iterator over the models in the Dataset.
+// Yielded [Model] handles contain only resource identifiers. Call
+// [Model.Metadata] on each handle if you need fields such as labels, type,
+// or training statistics.
 func (d *Dataset) Models(ctx context.Context) *ModelIterator {
 	it := &ModelIterator{
 		ctx:     ctx,
@@ -796,6 +831,9 @@ func (d *Dataset) Routine(routineID string) *Routine {
 }
 
 // Routines returns an iterator over the routines in the Dataset.
+// Yielded [Routine] handles contain only resource identifiers. Call
+// [Routine.Metadata] on each handle if you need fields such as type, language,
+// or body.
 func (d *Dataset) Routines(ctx context.Context) *RoutineIterator {
 	it := &RoutineIterator{
 		ctx:     ctx,
@@ -878,6 +916,9 @@ func bqToRoutine(mr *bq.RoutineReference, c *Client) *Routine {
 // Datasets returns an iterator over the datasets in a project.
 // The Client's project is used by default, but that can be
 // changed by setting ProjectID on the returned iterator before calling Next.
+// Yielded [Dataset] handles contain only resource identifiers. Call
+// [Dataset.Metadata] on each handle if you need fields such as labels, location,
+// or access entries.
 func (c *Client) Datasets(ctx context.Context) *DatasetIterator {
 	return c.DatasetsInProject(ctx, c.projectID)
 }
@@ -905,7 +946,7 @@ type DatasetIterator struct {
 	ListHidden bool
 
 	// Filter restricts the datasets returned by label. The filter syntax is described in
-	// https://cloud.google.com/bigquery/docs/labeling-datasets#filtering_datasets_using_labels
+	// https://docs.cloud.google.com/bigquery/docs/filtering-labels#filtering_datasets_using_labels.
 	// Set before the first call to Next.
 	Filter string
 

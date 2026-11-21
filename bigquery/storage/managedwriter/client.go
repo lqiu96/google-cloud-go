@@ -34,13 +34,16 @@ import (
 // DetectProjectID is a sentinel value that instructs NewClient to detect the
 // project ID. It is given in place of the projectID argument. NewClient will
 // use the project ID from the given credentials or the default credentials
-// (https://developers.google.com/accounts/docs/application-default-credentials)
+// (https://docs.cloud.google.com/docs/authentication/application-default-credentials)
 // if no credentials were provided. When providing credentials, not all
 // options will allow NewClient to extract the project ID. Specifically a JWT
 // does not have the project ID encoded.
 const DetectProjectID = "*detect-project-id*"
 
 // Client is a managed BigQuery Storage write client scoped to a single project.
+// Clients should be reused across goroutines rather than created per request.
+// Call [Client.Close] when finished (after closing any [ManagedStream] instances)
+// to release connection pools and underlying gRPC connections.
 type Client struct {
 	rawClient *storage.BigQueryWriteClient
 	projectID string
@@ -61,8 +64,9 @@ type Client struct {
 
 // NewClient instantiates a new client.
 //
-// The context provided here is retained and used for background connection management
-// between the client and the BigQuery Storage service.
+// Pass a long-lived client-lifetime context (such as context.Background()), not
+// a short per-request timeout. The context is retained to manage background
+// connection pools and reconnects until [Client.Close] is called.
 func NewClient(ctx context.Context, projectID string, opts ...option.ClientOption) (c *Client, err error) {
 	// Set a reasonable default for the gRPC connection pool size.
 	numConns := min(runtime.GOMAXPROCS(0), 4)
@@ -97,7 +101,9 @@ func NewClient(ctx context.Context, projectID string, opts ...option.ClientOptio
 	}, nil
 }
 
-// Close releases resources held by the client.
+// Close releases connection pools, cancels the client context, and closes the
+// underlying gRPC client. Close any active [ManagedStream] instances before
+// calling Close.
 func (c *Client) Close() error {
 
 	// Shutdown the per-region pools.
@@ -123,7 +129,12 @@ func (c *Client) Close() error {
 
 // NewManagedStream establishes a new managed stream for appending data into a table.
 //
-// Context here is retained for use by the underlying streaming connections the managed stream may create.
+// Pass a stream-lifetime context, not a short per-request timeout. The context is
+// retained for the lifetime of the stream, and canceling or expiring it permanently
+// closes the stream so all subsequent [ManagedStream.AppendRows] calls fail.
+// Pass [EnableWriteRetries] with true to automatically recover from idle
+// disconnects (after roughly 10 minutes) and transient errors. Call
+// [ManagedStream.Close] when finished.
 func (c *Client) NewManagedStream(ctx context.Context, opts ...WriterOption) (*ManagedStream, error) {
 	return c.buildManagedStream(ctx, c.rawClient.AppendRows, false, opts...)
 }
