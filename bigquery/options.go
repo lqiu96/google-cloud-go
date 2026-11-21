@@ -39,8 +39,9 @@ func newCustomClientConfig(opts ...option.ClientOption) *customClientConfig {
 	return conf
 }
 
-// JobCreationMode controls how job creation is handled.  Some queries may
-// be run without creating a job to expedite fetching results.
+// JobCreationMode controls whether BigQuery creates a job when running a query
+// on the [Query.Read] fast path (jobs.query). It has no effect on [Query.Run]
+// or on queries that fall back to creating a job.
 type JobCreationMode string
 
 var (
@@ -48,16 +49,19 @@ var (
 	JobCreationModeUnspecified JobCreationMode = "JOB_CREATION_MODE_UNSPECIFIED"
 	// JobCreationModeRequired indicates job creation is required.
 	JobCreationModeRequired JobCreationMode = "JOB_CREATION_REQUIRED"
-	// JobCreationModeOptional indicates job creation is optional, and returning
-	// results immediately is prioritized.  The conditions under which BigQuery
-	// can choose to avoid job creation are internal and subject to change.
+	// JobCreationModeOptional indicates job creation is optional, prioritizing
+	// immediate results on the [Query.Read] fast path. When BigQuery executes a
+	// query without creating a job, [RowIterator.SourceJob] returns nil and
+	// [RowIterator.QueryID] identifies the query. The conditions under which
+	// BigQuery avoids job creation are internal and subject to change.
 	JobCreationModeOptional JobCreationMode = "JOB_CREATION_OPTIONAL"
 )
 
-// WithDefaultJobCreationMode is a ClientOption that governs the job creation
-// mode used when executing queries that can be accelerated via the jobs.Query
-// API.  Users may experience performance improvements by leveraging the
-// JobCreationModeOptional mode.
+// WithDefaultJobCreationMode is an [option.ClientOption] for [NewClient] that
+// sets the default [JobCreationMode] for queries executed via the [Query.Read]
+// fast path (jobs.query). It can be overridden per query via
+// [QueryConfig.JobCreationMode] and has no effect on [Query.Run]. Users may
+// experience lower latency with [JobCreationModeOptional].
 func WithDefaultJobCreationMode(mode JobCreationMode) option.ClientOption {
 	return &applierJobCreationMode{mode: mode}
 }

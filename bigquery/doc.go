@@ -13,23 +13,55 @@
 // limitations under the License.
 
 /*
-Package bigquery provides a client for the BigQuery service.
+Package bigquery provides a client for the BigQuery service over the BigQuery
+REST/JSON API, with optional acceleration over the BigQuery Storage Read gRPC
+API via [Client.EnableStorageReadClient].
 
 The following assumes a basic familiarity with BigQuery concepts.
-See https://cloud.google.com/bigquery/docs.
+See https://docs.cloud.google.com/bigquery/docs.
 
-See https://godoc.org/cloud.google.com/go for authentication, timeouts,
-connection pooling and similar aspects of this package.
+See https://pkg.go.dev/cloud.google.com/go for authentication, timeouts,
+connection pooling, and similar aspects of this package.
+
+# Choosing a BigQuery Package
+
+This module includes several packages serving different use cases:
+
+  - cloud.google.com/go/bigquery (this package, GA): primary client for
+    queries, jobs, datasets, tables, models, routines, bulk loads, extracts,
+    copies, and legacy streaming inserts ([Inserter]).
+  - cloud.google.com/go/bigquery/storage/managedwriter (GA,
+    https://pkg.go.dev/cloud.google.com/go/bigquery/storage/managedwriter):
+    recommended client for new or high-throughput streaming ingestion using
+    the BigQuery Storage Write API.
+  - cloud.google.com/go/bigquery/storage/apiv1 (GA,
+    https://pkg.go.dev/cloud.google.com/go/bigquery/storage/apiv1): low-level
+    gRPC GAPIC clients for direct Storage Read and Write stream control.
+  - cloud.google.com/go/bigquery/v2 (experimental): experimental next-generation
+    GAPIC clients. Not a replacement for this package.
+  - Companion control-plane GAPIC subpackages (connection/apiv1,
+    datatransfer/apiv1, reservation/apiv1, biglake/apiv1, analyticshub/apiv1,
+    datapolicies/apiv1, and migration/apiv2): separate administrative services.
 
 # Creating a Client
 
-To start working with this package, create a client with [NewClient]:
+To start working with this package, create a client with [NewClient]. Reuse a
+single client across requests instead of creating one per request, and call
+[Client.Close] when finished:
 
 	ctx := context.Background()
 	client, err := bigquery.NewClient(ctx, projectID)
 	if err != nil {
 	    // TODO: Handle error.
 	}
+	defer client.Close()
+
+After initial configuration (setting [Client.Location] and calling
+[Client.EnableStorageReadClient]), [Client] methods and resource handles
+([Dataset], [Table], [Model], [Routine]) are safe for concurrent use by
+multiple goroutines. Iterators ([RowIterator], [JobIterator], and others),
+[Job] status updates, and request builders ([Query], [Loader], [Extractor],
+[Copier], and [Inserter] option fields) are not safe for concurrent use.
 
 # Querying
 
@@ -109,7 +141,7 @@ To retrieve the job's results from the ID, first look up the [Job] with the [Cli
 
 Use the [Job.Read] method to obtain an iterator, and loop over the rows.
 Calling [Query.Read] is preferred for queries with a relatively small result set,
-as it will call BigQuery jobs.query API for a optimized query path. If the query
+as it will call BigQuery jobs.query API for an optimized query path. If the query
 doesn't meet that criteria, the method will just combine [Query.Run] and [Job.Read].
 
 	it, err = job.Read(ctx)
@@ -191,7 +223,7 @@ automatically inferred as nullable, so the "nullable" tag is only needed for []b
 	if err != nil {
 	    // TODO: Handle error.
 	}
-	// schema3 has required fields "full_name" and "Grade", and nullable BYTES field "Optional".
+	// schema3 has required field "full_name", repeated field "Grades", and nullable BYTES field "Optional".
 
 Having constructed a schema, you can create a table with it using the [Table.Create] method like so:
 
@@ -299,9 +331,9 @@ to specify the schema and insert ID by hand:
 
 	// Assume schema holds the table's schema.
 	savers := []*bigquery.StructSaver{
-		{Struct: score{Name: "n1", Num: 12}, Schema: schema, InsertID: "id1"},
-		{Struct: score{Name: "n2", Num: 31}, Schema: schema, InsertID: "id2"},
-		{Struct: score{Name: "n3", Num: 7}, Schema: schema, InsertID: "id3"},
+		{Struct: item{Name: "n1", Num: 12}, Schema: schema, InsertID: "id1"},
+		{Struct: item{Name: "n2", Num: 31}, Schema: schema, InsertID: "id2"},
+		{Struct: item{Name: "n3", Num: 7}, Schema: schema, InsertID: "id3"},
 	}
 
 	if err := u.Put(ctx, savers); err != nil {
@@ -342,16 +374,50 @@ into a Google Cloud Storage object will feel familiar. First create an
 
 # Errors
 
-Errors returned by this client are often of the type [googleapi.Error].
-These errors can be introspected for more information by using [errors.As]
-with the richer [googleapi.Error] type. For example:
+Errors returned by this package come from distinct surfaces depending on the
+operation:
+
+  - Synchronous REST RPC failures typically wrap
+    *[google.golang.org/api/googleapi.Error].
+  - Asynchronous job failures returned by [JobStatus.Err] and [JobStatus.Errors]
+    use *[Error]. Match them with [errors.As] using a pointer target
+    (var bqErr *bigquery.Error).
+  - Streaming row rejections from [Inserter.Put] return [PutMultiError]
+    (containing [RowInsertionError] entries with [MultiError] slices). None of
+    these wrapper types implement Unwrap, so extract [PutMultiError] with
+    [errors.As] and iterate its elements directly.
+  - Storage Read API failures (when [Client.EnableStorageReadClient] is enabled)
+    wrap gRPC status errors.
+  - Authentication and token-fetch failures may originate from
+    golang.org/x/oauth2 rather than *[google.golang.org/api/googleapi.Error].
+
+Use [errors.As] to inspect REST API errors:
 
 	var e *googleapi.Error
-	if ok := errors.As(err, &e); ok {
-		  if e.Code == 409 { ... }
+	if errors.As(err, &e) {
+		if e.Code == 409 { ... }
 	}
 
-In some cases, your client may received unstructured [googleapi.Error] error responses.  In such cases, it is likely that
-you have exceeded BigQuery request limits, documented at: https://cloud.google.com/bigquery/quotas
+In some cases, your client may receive unstructured
+*[google.golang.org/api/googleapi.Error] responses when exceeding BigQuery
+request limits. See https://docs.cloud.google.com/bigquery/docs/errors for API
+HTTP status and error reason codes,
+https://docs.cloud.google.com/bigquery/docs/error-messages for client and
+connectivity errors, and https://docs.cloud.google.com/bigquery/quotas for
+request limits.
+
+# Retries and Timeouts
+
+Most RPCs automatically retry transient network and transport errors, HTTP 5xx
+responses (500, 502, 503, and 504), and selected structured BigQuery error
+reasons (such as backendError and rateLimitExceeded, plus jobRateLimitExceeded
+and internalError when enqueuing jobs) using hardcoded exponential backoff until
+the context is canceled or expires. Always pass a context with a deadline or
+timeout, because retries have no fixed maximum attempt limit.
+
+Automatic retries do not apply to unstructured HTTP 429 responses (without a
+structured rateLimitExceeded reason), quotaExceeded errors, loads from a
+[ReaderSource], or [Dataset.Create], [Routine.Create], [Model.Delete], and
+[Routine.Delete].
 */
 package bigquery // import "cloud.google.com/go/bigquery"

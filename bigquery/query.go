@@ -31,7 +31,9 @@ type QueryConfig struct {
 	// If this field is nil, a temporary table will be created.
 	Dst *Table
 
-	// The query to execute. See https://cloud.google.com/bigquery/query-reference for details.
+	// The query to execute. Standard SQL is used by default unless UseLegacySQL
+	// is set to true. See
+	// https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax.
 	Q string
 
 	// DefaultProjectID and DefaultDatasetID specify the dataset to use for unqualified table names in the query.
@@ -41,6 +43,12 @@ type QueryConfig struct {
 
 	// TableDefinitions describes data sources outside of BigQuery.
 	// The map keys may be used as table names in the query string.
+	//
+	// Querying external tables backed by Google Drive or Google Sheets requires
+	// adding the appropriate Google Drive OAuth scope (via
+	// [google.golang.org/api/option.WithScopes]) when constructing the [Client]
+	// and granting the credentials access to the Drive resource. See
+	// https://docs.cloud.google.com/bigquery/docs/external-data-drive.
 	//
 	// When a QueryConfig is returned from Job.Config, the map values
 	// are always of type *ExternalDataConfig.
@@ -58,24 +66,25 @@ type QueryConfig struct {
 	// If this field is false, results are fetched from the cache if they are available.
 	// The query cache is a best-effort cache that is flushed whenever tables in the query are modified.
 	// Cached results are only available when TableID is unspecified in the query's destination Table.
-	// For more information, see https://cloud.google.com/bigquery/querying-data#querycaching
+	// For more information, see https://docs.cloud.google.com/bigquery/docs/cached-results.
 	DisableQueryCache bool
 
-	// DisableFlattenedResults prevents results being flattened.
-	// If this field is false, results from nested and repeated fields are flattened.
-	// DisableFlattenedResults implies AllowLargeResults
-	// For more information, see https://cloud.google.com/bigquery/docs/data#nested
+	// DisableFlattenedResults prevents results from being flattened in legacy SQL queries.
+	// This option applies only when UseLegacySQL is true. In Standard SQL (the default),
+	// nested and repeated fields are never flattened regardless of this field.
+	// DisableFlattenedResults implies AllowLargeResults.
+	// For more information, see https://docs.cloud.google.com/bigquery/docs/legacy-nested-repeated.
 	DisableFlattenedResults bool
 
 	// AllowLargeResults allows the query to produce arbitrarily large result tables.
 	// The destination must be a table.
 	// When using this option, queries will take longer to execute, even if the result set is small.
-	// For additional limitations, see https://cloud.google.com/bigquery/querying-data#largequeryresults
+	// For additional limitations, see https://docs.cloud.google.com/bigquery/docs/writing-results#large-results.
 	AllowLargeResults bool
 
 	// Priority specifies the priority with which to schedule the query.
 	// The default priority is InteractivePriority.
-	// For more information, see https://cloud.google.com/bigquery/querying-data#batchqueries
+	// For more information, see https://docs.cloud.google.com/bigquery/docs/running-queries#batch.
 	Priority QueryPriority
 
 	// MaxBillingTier sets the maximum billing tier for a Query.
@@ -94,14 +103,17 @@ type QueryConfig struct {
 	// Deprecated: use UseLegacySQL.
 	UseStandardSQL bool
 
-	// UseLegacySQL causes the query to use legacy SQL.
+	// UseLegacySQL causes the query to use legacy SQL instead of the default
+	// Standard SQL. Query parameters ([QueryConfig.Parameters]) are not
+	// supported when UseLegacySQL is true.
 	UseLegacySQL bool
 
-	// Parameters is a list of query parameters. The presence of parameters
-	// implies the use of standard SQL.
-	// If the query uses positional syntax ("?"), then no parameter may have a name.
-	// If the query uses named syntax ("@p"), then all parameters must have names.
-	// It is illegal to mix positional and named syntax.
+	// Parameters is a list of query parameters. Query parameters require
+	// Standard SQL (setting both Parameters and UseLegacySQL returns an error).
+	// For positional syntax ("?"), leave [QueryParameter.Name] empty on every
+	// parameter. For named syntax ("@p"), set [QueryParameter.Name] without the
+	// leading "@" (for example, "p"). Mixing positional and named syntax is not
+	// allowed. See https://docs.cloud.google.com/bigquery/docs/parameterized-queries.
 	Parameters []QueryParameter
 
 	// TimePartitioning specifies time-based partitioning
@@ -122,9 +134,10 @@ type QueryConfig struct {
 	// empty response with some processing statistics, while an invalid query will
 	// return the same error it would if it wasn't a dry run.
 	//
-	// Query.Read will fail with dry-run queries. Call Query.Run instead, and then
-	// call LastStatus on the returned job to get statistics. Calling Status on a
-	// dry-run job will fail.
+	// [Query.Read] fails with dry-run queries. Call [Query.Run] instead, and
+	// then call [Job.LastStatus] on the returned job to get validation
+	// statistics. Calling [Job.Status], [Job.Wait], or [Job.Read] on a dry-run
+	// job fails.
 	DryRun bool
 
 	// Custom encryption configuration (e.g., Cloud KMS keys).
@@ -172,8 +185,14 @@ type QueryConfig struct {
 	// Whether to run the query as continuous or a regular query.
 	Continuous bool
 
-	// JobCreationMode controls how job creation is handled for this query.
-	// If not specified, the default JobCreationMode on the client is used.
+	// JobCreationMode controls how job creation is handled when executing on the
+	// [Query.Read] fast path (jobs.query). If not specified, the default
+	// [JobCreationMode] configured via [WithDefaultJobCreationMode] is used.
+	//
+	// This field has no effect on [Query.Run] or when [Query.Read] falls back to
+	// creating a job. When [JobCreationModeOptional] avoids creating a job,
+	// [RowIterator.SourceJob] returns nil and [RowIterator.QueryID] identifies
+	// the query.
 	JobCreationMode JobCreationMode
 }
 
@@ -340,7 +359,7 @@ const (
 	// count towards your concurrent rate limit, which can make it easier to
 	// start many queries at once.
 	//
-	// More information can be found at https://cloud.google.com/bigquery/docs/running-queries#batchqueries.
+	// More information can be found at https://docs.cloud.google.com/bigquery/docs/running-queries#batch.
 	BatchPriority QueryPriority = "BATCH"
 	// InteractivePriority specifies that the query should be scheduled with
 	// interactive priority, which means that the query is executed as soon as
@@ -348,19 +367,22 @@ const (
 	// and your daily limit. It is the default priority with which queries get
 	// executed.
 	//
-	// More information can be found at https://cloud.google.com/bigquery/docs/running-queries#queries.
+	// More information can be found at https://docs.cloud.google.com/bigquery/docs/running-queries#queries.
 	InteractivePriority QueryPriority = "INTERACTIVE"
 )
 
-// A Query queries data from a BigQuery table. Use Client.Query to create a Query.
+// A Query queries data from a BigQuery table using Standard SQL by default.
+// Use [Client.Query] to create a Query. A Query is not safe for concurrent
+// modification across goroutines.
 type Query struct {
 	JobIDConfig
 	QueryConfig
 	client *Client
 }
 
-// Query creates a query with string q.
-// The returned Query may optionally be further configured before its Run method is called.
+// Query creates a [Query] with Standard SQL string q.
+// The returned Query may optionally be further configured before [Query.Read]
+// or [Query.Run] is called.
 func (c *Client) Query(q string) *Query {
 	return &Query{
 		client:      c,
@@ -368,7 +390,17 @@ func (c *Client) Query(q string) *Query {
 	}
 }
 
-// Run initiates a query job.
+// Run initiates an asynchronous query job via jobs.insert and returns a [Job].
+//
+// Use Run followed by [Job.Read] (or [Job.Wait]) when you need guaranteed job
+// metadata, query statistics, dry-run validation ([QueryConfig.DryRun]), or
+// options unsupported by the [Query.Read] fast path. For a dry-run query,
+// inspect [Job.LastStatus] directly without calling [Job.Status], [Job.Wait],
+// or [Job.Read].
+//
+// If the submitted job fails with a transient job error (such as
+// jobRateLimitExceeded, jobBackendError, or jobInternalError), submit a new
+// query with a new job ID rather than retrying or polling the failed job.
 func (q *Query) Run(ctx context.Context) (j *Job, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/bigquery.Query.Run")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -395,10 +427,20 @@ func (q *Query) newJob() (*bq.Job, error) {
 	}, nil
 }
 
-// Read submits a query for execution and returns the results via a RowIterator.
-// If the request can be satisfied by running using the optimized query path, it
-// is used in place of the jobs.insert path as this path does not expose a job
-// object.
+// Read submits a query for execution and returns the results via a
+// [RowIterator].
+//
+// When all configured options are supported, Read uses the stateless jobs.query
+// fast path instead of jobs.insert. Under [JobCreationModeOptional], BigQuery
+// may execute the query without creating a job, in which case
+// [RowIterator.SourceJob] returns nil and [RowIterator.QueryID] identifies the
+// query. Single-page fast-path results stay on REST even when
+// [Client.EnableStorageReadClient] is enabled.
+//
+// For unsupported options, Read falls back to [Query.Run] followed by
+// [Job.Read]. Call [Query.Run] directly when you need guaranteed job metadata
+// or statistics, or when [QueryConfig.DryRun] is true (dry-run queries fail in
+// Read).
 func (q *Query) Read(ctx context.Context) (it *RowIterator, err error) {
 	if q.QueryConfig.DryRun {
 		return nil, errors.New("bigquery: cannot evaluate Query.Read() for dry-run queries")

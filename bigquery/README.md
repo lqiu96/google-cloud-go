@@ -1,7 +1,7 @@
 ## BigQuery [![Go Reference](https://pkg.go.dev/badge/cloud.google.com/go/bigquery.svg)](https://pkg.go.dev/cloud.google.com/go/bigquery)
 
 - [About BigQuery](https://cloud.google.com/bigquery/)
-- [API documentation](https://cloud.google.com/bigquery/docs)
+- [API documentation](https://docs.cloud.google.com/bigquery/docs)
 - [Go client documentation](https://pkg.go.dev/cloud.google.com/go/bigquery)
 - [Complete sample programs](https://github.com/GoogleCloudPlatform/golang-samples/tree/main/bigquery)
 
@@ -14,18 +14,19 @@ c, err := bigquery.NewClient(ctx, "my-project-ID")
 if err != nil {
 	// TODO: Handle error.
 }
+defer c.Close()
 ```
 
 Then use that client to interact with the API:
 [snip]:# (bq-2)
 ```go
-// Construct a query.
+// Construct a query using Standard SQL (the default).
 q := c.Query(`
-    SELECT year, SUM(number)
-    FROM [bigquery-public-data:usa_names.usa_1910_2013]
-    WHERE name = "William"
-    GROUP BY year
-    ORDER BY year
+	SELECT year, SUM(number) AS num
+	FROM bigquery-public-data.usa_names.usa_1910_2013
+	WHERE name = 'William'
+	GROUP BY year
+	ORDER BY year
 `)
 // Execute the query.
 it, err := q.Read(ctx)

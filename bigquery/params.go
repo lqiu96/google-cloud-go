@@ -30,7 +30,7 @@ import (
 	bq "google.golang.org/api/bigquery/v2"
 )
 
-// See https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types#timestamp_type.
+// See https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-types#timestamp_type.
 var (
 	timestampFormat  = "2006-01-02 15:04:05.999999-07:00"
 	dateTimeFormat   = "2006-01-02 15:04:05"
@@ -38,7 +38,7 @@ var (
 )
 
 var (
-	// See https://cloud.google.com/bigquery/docs/reference/rest/v2/tables#schema.fields.name
+	// See https://docs.cloud.google.com/bigquery/docs/schemas#column_names.
 	validFieldName = regexp.MustCompile("^[a-zA-Z_][a-zA-Z0-9_]{0,127}$")
 )
 
@@ -102,57 +102,77 @@ var (
 	typeOfQueryParameterValue = reflect.TypeFor[*QueryParameterValue]()
 )
 
-// A QueryParameter is a parameter to a query.
+// A QueryParameter is a parameter to a Standard SQL query.
 type QueryParameter struct {
-	// Name is used for named parameter mode.
-	// It must match the name in the query case-insensitively.
+	// Name is used for named parameter mode ("@name" in SQL). Omit the leading
+	// "@" prefix (for "@foo" in SQL, set Name to "foo"). It matches the name in
+	// the query case-insensitively.
+	//
+	// Leave Name empty for positional parameter mode ("?"). Named and positional
+	// parameters cannot be mixed in the same query.
 	Name string
 
 	// Value is the value of the parameter.
 	//
 	// When you create a QueryParameter to send to BigQuery, the following Go types
-	// are supported, with their corresponding Bigquery types:
-	// int, int8, int16, int32, int64, uint8, uint16, uint32: INT64
-	//   Note that uint, uint64 and uintptr are not supported, because
-	//   they may contain values that cannot fit into a 64-bit signed integer.
-	// float32, float64: FLOAT64
-	// bool: BOOL
-	// string: STRING
-	// []byte: BYTES
-	// time.Time: TIMESTAMP
-	// *big.Rat: NUMERIC
-	// *IntervalValue: INTERVAL
-	// Arrays and slices of the above.
-	// Structs of the above. Only the exported fields are used.
+	// are supported, with their corresponding BigQuery types:
+	//   - int, int8, int16, int32, int64, uint8, uint16, uint32: INT64
+	//     (uint, uint64, and uintptr are not supported because they may exceed a
+	//     64-bit signed integer)
+	//   - float32, float64: FLOAT64
+	//   - bool: BOOL
+	//   - string: STRING
+	//   - []byte: BYTES
+	//   - time.Time: TIMESTAMP (microsecond precision)
+	//   - [cloud.google.com/go/civil.Date]: DATE
+	//   - [cloud.google.com/go/civil.Time]: TIME (rounded to microsecond precision)
+	//   - [cloud.google.com/go/civil.DateTime]: DATETIME (rounded to microsecond precision)
+	//   - *[math/big.Rat]: NUMERIC (rounded to 9 fractional digits)
+	//   - *[IntervalValue]: INTERVAL
+	//   - *[RangeValue]: RANGE (at least one of Start or End must be non-nil to
+	//     infer the element type, otherwise use *[QueryParameterValue] for unbounded ranges)
+	//   - Arrays and slices of the above
+	//   - Structs (and pointers to structs) of the above (only exported fields are used)
 	//
-	// For scalar values, you can supply the Null types within this library
-	// to send the appropriate NULL values (e.g. NullInt64, NullString, etc).
+	// Untyped nil and pointers to scalar types (such as *int64 or *string) are
+	// rejected. To send a typed SQL NULL, supply one of the Null* types
+	// ([NullInt64], [NullString], [NullFloat64], [NullBool], [NullTimestamp],
+	// [NullDate], [NullTime], [NullDateTime], [NullGeography], [NullJSON]) with
+	// Valid set to false, or an explicit *[QueryParameterValue]. Convert defined
+	// types (such as protobuf enum integers implementing fmt.Stringer, defined
+	// []byte slices, or defined wrappers around time.Time or civil types) to
+	// their underlying built-in Go types before passing them as parameters.
 	//
-	// To specify query parameters explicitly rather by inference, *QueryParameterValue can be used.
-	// For example, a BIGNUMERIC can be specified like this:
-	// &QueryParameterValue{
+	// Note that empty or nil Go slices currently serialize with arrayValues
+	// omitted (treated as NULL by BigQuery rather than an empty array), and an
+	// empty []byte{} omits value on the wire.
+	//
+	// *[math/big.Rat] always infers NUMERIC (9 fractional digits). To specify
+	// query parameters explicitly rather than by inference (such as BIGNUMERIC
+	// with up to 38 fractional digits), pass *[QueryParameterValue]:
+	//
+	//	&QueryParameterValue{
 	//		Type: StandardSQLDataType{
 	//			TypeKind: "BIGNUMERIC",
 	//		},
-	//		Value: BigNumericString(*big.Rat),
+	//		Value: BigNumericString(big.NewRat(12345, 1000)),
 	//	}
 	//
-	// When a QueryParameter is returned inside a QueryConfig from a call to
-	// Job.Config:
-	// Integers are of type int64.
-	// Floating-point values are of type float64.
-	// Arrays are of type []interface{}, regardless of the array element type.
-	// Structs are of type map[string]interface{}.
+	// When a QueryParameter is returned inside a [QueryConfig] from [Job.Config]:
+	//   - Integers are of type int64.
+	//   - Floating-point values are of type float64.
+	//   - Arrays are of type []interface{}, regardless of the array element type.
+	//   - Structs are of type map[string]interface{}.
 	//
-	// When valid (non-null) Null types are sent, they come back as the Go types indicated
-	// above.  Null strings will report in query statistics as a valid empty
+	// When valid (non-null) Null types are sent, they come back as the Go types
+	// indicated above. Null strings report in query statistics as a valid empty
 	// string.
 	Value any
 }
 
-// QueryParameterValue is a go type for representing a explicit typed QueryParameter.
+// QueryParameterValue is a Go type for representing an explicitly typed [QueryParameter].
 type QueryParameterValue struct {
-	// Type specifies the parameter type. See StandardSQLDataType for more.
+	// Type specifies the parameter type. See [StandardSQLDataType] for more.
 	// Scalar parameters and more complex types can be defined within this field.
 	// See examples on the value fields.
 	Type StandardSQLDataType
@@ -160,34 +180,36 @@ type QueryParameterValue struct {
 	// Value is the value of the parameter, if a simple scalar type.
 	// The default behavior for scalar values is to do type inference
 	// and format it accordingly.
-	// Because of that, depending on the parameter type, is recommended
-	// to send value as a String.
-	// We provide some formatter functions for some types:
-	//   CivilTimeString(civil.Time)
-	//   CivilDateTimeString(civil.DateTime)
-	//   NumericString(*big.Rat)
-	//   BigNumericString(*big.Rat)
-	//   IntervalString(*IntervalValue)
+	// Because of that, depending on the parameter type, it is recommended
+	// to send the value as a string.
+	// Formatter functions are provided for several types:
+	//   - [CivilTimeString]
+	//   - [CivilDateTimeString]
+	//   - [NumericString]
+	//   - [BigNumericString]
+	//   - [IntervalString]
 	//
 	// Example:
 	//
-	// &QueryParameterValue{
-	// 		Type: StandardSQLDataType{
+	//	&QueryParameterValue{
+	//		Type: StandardSQLDataType{
 	//			TypeKind: "BIGNUMERIC",
 	//		},
-	//		Value: BigNumericString(*big.Rat),
+	//		Value: BigNumericString(big.NewRat(12345, 1000)),
 	//	}
 	Value any
 
 	// ArrayValue is the array of values for the parameter.
 	//
-	// Must be used with QueryParameterValue.Type being a StandardSQLDataType
-	// with ArrayElementType filled with the given element type.
+	// Must be used with QueryParameterValue.Type being a [StandardSQLDataType]
+	// with ArrayElementType filled with the given element type. Passing an empty
+	// ArrayValue currently returns a nil parameter error.
 	//
-	// Example of an array of strings :
-	// &QueryParameterValue{
-	//		Type: &StandardSQLDataType{
-	// 			ArrayElementType: &StandardSQLDataType{
+	// Example of an array of strings:
+	//
+	//	&QueryParameterValue{
+	//		Type: StandardSQLDataType{
+	//			ArrayElementType: &StandardSQLDataType{
 	//				TypeKind: "STRING",
 	//			},
 	//		},
@@ -197,11 +219,12 @@ type QueryParameterValue struct {
 	//		},
 	//	}
 	//
-	// Example of an array of structs :
-	// &QueryParameterValue{
-	//		Type: &StandardSQLDataType{
-	// 			ArrayElementType: &StandardSQLDataType{
-	//	 			StructType: &StandardSQLDataType{
+	// Example of an array of structs:
+	//
+	//	&QueryParameterValue{
+	//		Type: StandardSQLDataType{
+	//			ArrayElementType: &StandardSQLDataType{
+	//				StructType: &StandardSQLStructType{
 	//					Fields: []*StandardSQLField{
 	//						{
 	//							Name: "NumberField",
@@ -212,32 +235,33 @@ type QueryParameterValue struct {
 	//					},
 	//				},
 	//			},
-	// 		},
+	//		},
 	//		ArrayValue: []QueryParameterValue{
 	//			{StructValue: map[string]QueryParameterValue{
 	//				"NumberField": {
 	//					Value: int64(42),
 	//				},
-	// 			}},
-	// 			{StructValue: map[string]QueryParameterValue{
+	//			}},
+	//			{StructValue: map[string]QueryParameterValue{
 	//				"NumberField": {
 	//					Value: int64(43),
 	//				},
-	// 			}},
+	//			}},
 	//		},
 	//	}
 	ArrayValue []QueryParameterValue
 
 	// StructValue is the struct field values for the parameter.
 	//
-	// Must be used with QueryParameterValue.Type being a StandardSQLDataType
-	// with StructType filled with the given field types.
+	// Must be used with QueryParameterValue.Type being a [StandardSQLDataType]
+	// with StructType filled with the given field types. Passing an empty
+	// StructValue currently returns a nil parameter error.
 	//
 	// Example:
 	//
-	// &QueryParameterValue{
-	//		Type: &StandardSQLDataType{
-	// 			StructType{
+	//	&QueryParameterValue{
+	//		Type: StandardSQLDataType{
+	//			StructType: &StandardSQLStructType{
 	//				Fields: []*StandardSQLField{
 	//					{
 	//						Name: "StringField",
@@ -254,7 +278,7 @@ type QueryParameterValue struct {
 	//				},
 	//			},
 	//		},
-	//		StructValue: []map[string]QueryParameterValue{
+	//		StructValue: map[string]QueryParameterValue{
 	//			"NumberField": {
 	//				Value: int64(42),
 	//			},

@@ -28,7 +28,11 @@ import (
 	"google.golang.org/api/iterator"
 )
 
-// A Job represents an operation which has been submitted to BigQuery for processing.
+// A Job represents an operation submitted to BigQuery for processing.
+//
+// A Job is not safe for concurrent use by multiple goroutines, because
+// [Job.Status] and [Job.Wait] update the cached [Job.LastStatus] without
+// synchronization.
 type Job struct {
 	c          *Client
 	projectID  string
@@ -40,26 +44,30 @@ type Job struct {
 	queryID    string
 }
 
-// JobFromID creates a Job which refers to an existing BigQuery job. The job
-// need not have been created by this package. For example, the job may have
-// been created in the BigQuery console.
+// JobFromID creates a [Job] referring to an existing BigQuery job in the
+// client's project and [Client.Location]. The job need not have been created by
+// this package (for example, it may have been created in the BigQuery console).
 //
-// For jobs whose location is other than "US" or "EU", set Client.Location or use
-// JobFromIDLocation.
+// If [Client.Location] is empty, BigQuery defaults to the US and EU
+// multi-regions and returns HTTP 404 for jobs in single-region locations. For
+// single-region jobs, set [Client.Location] or use [Client.JobFromIDLocation].
+// For jobs in another project, use [Client.JobFromProject].
 func (c *Client) JobFromID(ctx context.Context, id string) (*Job, error) {
 	return c.JobFromProject(ctx, c.projectID, id, c.Location)
 }
 
-// JobFromIDLocation creates a Job which refers to an existing BigQuery job. The job
-// need not have been created by this package (for example, it may have
-// been created in the BigQuery console), but it must exist in the specified location.
+// JobFromIDLocation creates a [Job] referring to an existing BigQuery job in
+// the client's project and the specified location. The job need not have been
+// created by this package (for example, it may have been created in the
+// BigQuery console). For jobs in another project, use [Client.JobFromProject].
 func (c *Client) JobFromIDLocation(ctx context.Context, id, location string) (j *Job, err error) {
 	return c.JobFromProject(ctx, c.projectID, id, location)
 }
 
-// JobFromProject creates a Job which refers to an existing BigQuery job. The job
-// need not have been created by this package, nor does it need to reside within the same
-// project or location as the instantiated client.
+// JobFromProject creates a [Job] referring to an existing BigQuery job. The job
+// need not have been created by this package, nor does it need to reside within
+// the same project or location as the instantiated client. Pass a non-empty
+// location for single-region jobs outside the US and EU multi-regions.
 func (c *Client) JobFromProject(ctx context.Context, projectID, jobID, location string) (j *Job, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/bigquery.JobFromProject")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -113,6 +121,7 @@ type JobStatus struct {
 
 	// All errors encountered during the running of the job.
 	// Not all Errors are fatal, so errors here do not necessarily mean that the job has completed or was unsuccessful.
+	// For failed load jobs, inspect Errors in addition to [JobStatus.Err] for row-level and file-level diagnostics.
 	Errors []*Error
 
 	// Statistics about the job.
@@ -131,6 +140,12 @@ func (*LoadConfig) isJobConfig()    {}
 func (*QueryConfig) isJobConfig()   {}
 
 // Config returns the configuration information for j.
+//
+// On a [Job] returned by [Query.Run], Config retains the pre-execution
+// configuration captured at submission and is not refreshed by [Job.Status] or
+// [Job.Wait]. To inspect server-assigned fields such as a temporary destination
+// table ([QueryConfig.Dst]), fetch a fresh job via [Client.JobFromID] or
+// [Client.JobFromIDLocation] after execution.
 func (j *Job) Config() (JobConfig, error) {
 	return bqToJobConfig(j.config, j.c)
 }
@@ -169,7 +184,10 @@ type JobIDConfig struct {
 	// If AddJobIDSuffix is true, then a random string will be appended to JobID.
 	AddJobIDSuffix bool
 
-	// Location is the location for the job.
+	// Location is the location for the job. If empty, it inherits
+	// [Client.Location]. Set a matching location for single-region datasets
+	// outside the US and EU multi-regions, and for multi-statement SQL scripts
+	// whose initial statements do not reference a dataset.
 	Location string
 
 	// ProjectID is the Google Cloud project associated with the job.
@@ -203,12 +221,19 @@ func (s *JobStatus) Done() bool {
 	return s.State == Done
 }
 
-// Err returns the error that caused the job to complete unsuccessfully (if any).
+// Err returns the *[Error] that caused the job to complete unsuccessfully, or
+// nil if the job succeeded or has not completed. For detailed row-level
+// diagnostics on load jobs, also inspect [JobStatus.Errors].
 func (s *JobStatus) Err() error {
 	return s.err
 }
 
-// Status retrieves the current status of the job from BigQuery. It fails if the Status could not be determined.
+// Status makes a network call to retrieve the current status and statistics of
+// the job from BigQuery and updates the cached value returned by
+// [Job.LastStatus]. It is not safe for concurrent use on the same [Job].
+//
+// Status fails for dry-run query jobs ([QueryConfig.DryRun]), which are not
+// persisted by BigQuery. Inspect [Job.LastStatus] after [Query.Run] instead.
 func (j *Job) Status(ctx context.Context) (js *JobStatus, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/bigquery.Job.Status")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -224,9 +249,15 @@ func (j *Job) Status(ctx context.Context) (js *JobStatus, err error) {
 	return j.lastStatus, nil
 }
 
-// LastStatus returns the most recently retrieved status of the job. The status is
-// retrieved when a new job is created, or when JobFromID or Job.Status is called.
-// Call Job.Status to get the most up-to-date information about a job.
+// LastStatus returns the most recently cached status snapshot without making a
+// network call. The snapshot is populated when the job is created or retrieved
+// via [Client.JobFromID], [Client.JobFromIDLocation], or
+// [Client.JobFromProject], and updated by [Job.Status] and [Job.Wait] (except
+// when a query fails during [Job.Wait]).
+//
+// Call [Job.Status] to fetch fresh state for regular jobs. For dry-run query
+// jobs, LastStatus is the only way to inspect validation statistics after
+// [Query.Run].
 func (j *Job) LastStatus() *JobStatus {
 	return j.lastStatus
 }
@@ -274,11 +305,25 @@ func (j *Job) Delete(ctx context.Context) (err error) {
 	})
 }
 
-// Wait blocks until the job or the context is done. It returns the final status
-// of the job.
-// If an error occurs while retrieving the status, Wait returns that error. But
-// Wait returns nil if the status was retrieved successfully, even if
-// status.Err() != nil. So callers must check both errors. See the example.
+// Wait blocks until the job or context is done and returns the final
+// [JobStatus].
+//
+// Error semantics differ by job type. For load, copy, and extract jobs, Wait
+// polls [Job.Status] and returns (status, nil) even when the job fails in
+// BigQuery, so inspect status.Err() (and status.Errors for load diagnostics).
+// For query jobs, Wait polls jobs.getQueryResults, so query execution failures
+// are typically returned directly as (nil, err) without updating
+// [Job.LastStatus]. Always check both err and status.Err().
+//
+// Failed jobs are terminal and cannot be retried by polling or reusing the same
+// job ID. To recover from transient job failures (such as jobRateLimitExceeded,
+// jobBackendError, or jobInternalError), submit a new job with a new job ID.
+// Wait fails on dry-run query jobs (inspect [Job.LastStatus] after [Query.Run]
+// instead). For reading query results, call [Job.Read] directly, which waits
+// for completion without an extra [Job.Status] RPC.
+//
+// See https://docs.cloud.google.com/bigquery/docs/managing-jobs#repeat_jobs and
+// https://docs.cloud.google.com/bigquery/docs/errors.
 func (j *Job) Wait(ctx context.Context) (js *JobStatus, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/bigquery.Job.Wait")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -312,8 +357,14 @@ func (j *Job) Wait(ctx context.Context) (js *JobStatus, err error) {
 	return js, nil
 }
 
-// Read fetches the results of a query job.
-// If j is not a query job, Read returns an error.
+// Read waits for a query job to complete and returns its results via a
+// [RowIterator]. Call Read directly after [Query.Run] without calling
+// [Job.Wait] first to avoid an extra [Job.Status] RPC.
+//
+// Read returns an error if j is not a query job or is a dry-run query job. If
+// the job fails with a transient job error (such as jobRateLimitExceeded,
+// jobBackendError, or jobInternalError), submit a new query job with a new job
+// ID rather than retrying Read on the failed job.
 func (j *Job) Read(ctx context.Context) (ri *RowIterator, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/bigquery.Job.Read")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -546,7 +597,7 @@ type QueryStatistics struct {
 	// query impacted the DDL target table.
 	DDLOperationPerformed string
 
-	// The DDL target table, present only for CREATE/DROP FUNCTION/PROCEDURE queries.
+	// The DDL target routine, present only for CREATE/DROP FUNCTION/PROCEDURE queries.
 	DDLTargetRoutine *Routine
 
 	// Statistics for the EXPORT DATA statement as part of Query Job.
@@ -557,7 +608,7 @@ type QueryStatistics struct {
 }
 
 // ExportDataStatistics represents statistics for
-// a EXPORT DATA statement as part of Query Job.
+// an EXPORT DATA statement as part of a Query Job.
 type ExportDataStatistics struct {
 	// Number of destination files generated.
 	FileCount int64
@@ -761,7 +812,7 @@ var (
 
 // ReservationUsage contains information about a job's usage of a single reservation.
 type ReservationUsage struct {
-	// SlotMillis reports the slot milliseconds utilized within in the given reservation.
+	// SlotMillis reports the slot milliseconds utilized within the given reservation.
 	SlotMillis int64
 	// Name indicates the utilized reservation name, or "unreserved" for ondemand usage.
 	Name string
@@ -810,8 +861,8 @@ func bqToScriptStatistics(bs *bq.ScriptStatistics) *ScriptStatistics {
 //   - Multi-byte Unicode characters are treated as just one column.
 //   - If the original script (or procedure definition) contains TAB characters,
 //     a tab "snaps" the indentation forward to the nearest multiple of 8
-//     characters, plus 1. For example, a TAB on column 1, 2, 3, 4, 5, 6 , or 8
-//     will advance the next character to column 9.  A TAB on column 9, 10, 11,
+//     characters, plus 1. For example, a TAB on column 1, 2, 3, 4, 5, 6, 7, or 8
+//     will advance the next character to column 9. A TAB on column 9, 10, 11,
 //     12, 13, 14, 15, or 16 will advance the next character to column 17.
 type ScriptStackFrame struct {
 	StartLine   int64
@@ -1051,7 +1102,10 @@ func (*ExtractStatistics) implementsStatistics() {}
 func (*LoadStatistics) implementsStatistics()    {}
 func (*QueryStatistics) implementsStatistics()   {}
 
-// Jobs lists jobs within a project.
+// Jobs lists jobs across all locations within a project using full projection
+// (including full job configurations and statistics). Unlike [Client.JobFromID],
+// Jobs does not filter by [Client.Location]. Configure filter fields on the
+// returned [JobIterator] before calling Next.
 func (c *Client) Jobs(ctx context.Context) *JobIterator {
 	it := &JobIterator{
 		ctx:       setProjectItemTraceMetadata(ctx, c.projectID, "jobs"),

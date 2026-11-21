@@ -32,12 +32,12 @@ type StandardSQLDataType struct {
 	// TypeKind is STRUCT.
 	StructType *StandardSQLStructType
 	// The top-level type of this type definition.
-	// Can be any standard SQL data type.  For more information about BigQuery
+	// Can be any standard SQL data type. For more information about BigQuery
 	// data types, see
-	// https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types
+	// https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-types.
 	//
 	// Additional information is available in the REST documentation:
-	// https://cloud.google.com/bigquery/docs/reference/rest/v2/StandardSqlDataType
+	// https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/StandardSqlDataType.
 	TypeKind string
 }
 
@@ -170,7 +170,7 @@ func bqToStandardSQLField(bqf *bq.StandardSqlField) (*StandardSQLField, error) {
 
 // StandardSQLStructType represents a structure type, which is a list of Standard SQL fields.
 // For more information, see:
-// https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types#struct-type
+// https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-types#struct_type
 type StandardSQLStructType struct {
 	Fields []*StandardSQLField
 }

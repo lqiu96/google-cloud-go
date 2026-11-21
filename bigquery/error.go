@@ -21,8 +21,23 @@ import (
 	bq "google.golang.org/api/bigquery/v2"
 )
 
-// An Error contains detailed information about a failed bigquery operation.
-// Detailed description of possible Reasons can be found here: https://cloud.google.com/bigquery/troubleshooting-errors.
+// An Error contains detailed information about a failed BigQuery operation
+// returned in [JobStatus.Err], [JobStatus.Errors], or [RowInsertionError.Errors].
+// Synchronous REST request failures return *[google.golang.org/api/googleapi.Error]
+// instead, Storage Read API failures wrap gRPC status errors, and authentication
+// failures may originate from golang.org/x/oauth2.
+//
+// Although Error implements the error interface with a value receiver, this
+// package returns *Error values. Match them with errors.As using a pointer
+// target (var bqErr *bigquery.Error).
+//
+// Inspect Reason (not only the HTTP status code) to distinguish transient
+// failures (such as rateLimitExceeded, backendError, internalError,
+// jobRateLimitExceeded, jobBackendError, and jobInternalError) from permanent
+// errors. See https://docs.cloud.google.com/bigquery/docs/errors for API HTTP
+// status and error reason codes, and
+// https://docs.cloud.google.com/bigquery/docs/error-messages for client and
+// connectivity errors.
 type Error struct {
 	// Mirrors bq.ErrorProto, but drops DebugInfo
 	Location, Message, Reason string
@@ -43,7 +58,10 @@ func bqToError(ep *bq.ErrorProto) *Error {
 	}
 }
 
-// A MultiError contains multiple related errors.
+// A MultiError contains multiple related errors, such as *[Error] entries inside
+// [RowInsertionError.Errors]. MultiError does not implement Unwrap, so
+// [errors.Is] and [errors.As] do not inspect elements inside it. Iterate over
+// the slice directly.
 type MultiError []error
 
 func (m MultiError) Error() string {
@@ -58,7 +76,9 @@ func (m MultiError) Error() string {
 	return fmt.Sprintf("%s (and %d other errors)", m[0].Error(), len(m)-1)
 }
 
-// RowInsertionError contains all errors that occurred when attempting to insert a row.
+// RowInsertionError contains all errors that occurred when attempting to insert
+// a row via [Inserter.Put]. RowInsertionError does not implement Unwrap.
+// Inspect Errors directly for individual *[Error] reasons and messages.
 type RowInsertionError struct {
 	InsertID string // The InsertID associated with the affected row.
 	RowIndex int    // The 0-based index of the affected row in the batch of rows being inserted.
@@ -70,8 +90,10 @@ func (e *RowInsertionError) Error() string {
 	return fmt.Sprintf(errFmt, e.InsertID, e.RowIndex, e.Errors.Error())
 }
 
-// PutMultiError contains an error for each row which was not successfully inserted
-// into a BigQuery table.
+// PutMultiError contains a [RowInsertionError] for each row rejected during
+// [Inserter.Put]. Streaming inserts return HTTP 200 even when individual rows
+// fail validation. PutMultiError does not implement Unwrap, so extract it with
+// [errors.As] and iterate its [RowInsertionError] elements directly.
 type PutMultiError []RowInsertionError
 
 func (pme PutMultiError) errorDetails() string {

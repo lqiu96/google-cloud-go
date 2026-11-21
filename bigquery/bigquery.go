@@ -38,9 +38,9 @@ import (
 )
 
 const (
-	// Scope is the Oauth2 scope for the service.
+	// Scope is the OAuth 2.0 scope for the service.
 	// For relevant BigQuery scopes, see:
-	// https://developers.google.com/identity/protocols/googlescopes#bigqueryv2
+	// https://developers.google.com/identity/protocols/oauth2/scopes#bigquery
 	Scope           = "https://www.googleapis.com/auth/bigquery"
 	userAgentPrefix = "gcloud-golang-bigquery"
 )
@@ -51,11 +51,36 @@ func setClientHeader(headers http.Header) {
 	headers.Set("x-goog-api-client", xGoogHeader)
 }
 
-// Client may be used to perform BigQuery operations.
+// Client may be used to perform BigQuery operations over the BigQuery REST/JSON
+// API (and optionally the BigQuery Storage Read gRPC API when
+// [Client.EnableStorageReadClient] is called).
+//
+// Clients should be reused across requests instead of created per request.
+// After initial configuration (setting [Client.Location] and calling
+// [Client.EnableStorageReadClient]), Client methods are safe for concurrent use
+// by multiple goroutines. Iterators, [Job] status updates, and request builders
+// ([Query], [Loader], [Extractor], [Copier], and [Inserter] option fields) are
+// not safe for concurrent use. Call [Client.Close] when finished.
+//
+// Most RPCs automatically retry transient transport, HTTP 5xx, and selected
+// structured BigQuery error reasons using hardcoded exponential backoff until
+// the context expires. Always pass a context with a deadline. Unstructured HTTP
+// 429 responses, quotaExceeded errors, [ReaderSource] loads, and
+// [Dataset.Create], [Routine.Create], [Model.Delete], and [Routine.Delete] are
+// not retried automatically.
 type Client struct {
-	// Location, if set, will be used as the default location for all subsequent
-	// dataset creation and job operations. A location specified directly in one of
-	// those operations will override this value.
+	// Location, if set, is used as the default location for subsequent dataset
+	// creation, job submission, and [Client.JobFromID] lookups. A location
+	// specified directly on an operation ([JobIDConfig.Location],
+	// [DatasetMetadata.Location], or [Client.JobFromIDLocation]) overrides this
+	// value.
+	//
+	// Set Location during client initialization before sharing the client across
+	// goroutines. Single-region jobs outside the US and EU multi-regions require
+	// a matching location, and multi-statement SQL scripts may require an
+	// explicit location when initial statements do not reference a dataset.
+	// Location must match the region of referenced datasets.
+	// See https://docs.cloud.google.com/bigquery/docs/locations.
 	Location string
 
 	projectID string
@@ -69,17 +94,25 @@ type Client struct {
 // DetectProjectID is a sentinel value that instructs [NewClient] to detect the
 // project ID. It is given in place of the projectID argument. [NewClient] will
 // use the project ID from the given credentials or the default credentials
-// (https://developers.google.com/accounts/docs/application-default-credentials)
+// (https://docs.cloud.google.com/docs/authentication/application-default-credentials)
 // if no credentials were provided. When providing credentials, not all
 // options will allow [NewClient] to extract the project ID. Specifically a JWT
 // does not have the project ID encoded.
+//
+// Pass DetectProjectID only to [NewClient], not to other methods such as
+// [Client.DatasetInProject]. Call [Client.Project] to obtain the resolved
+// project ID after client creation.
 const DetectProjectID = "*detect-project-id*"
 
-// NewClient constructs a new [Client] which can perform BigQuery operations.
-// Operations performed via the client are billed to the specified GCP project.
+// NewClient constructs a new [Client] over the BigQuery REST/JSON API.
+// Operations performed via the client are billed to the specified Google Cloud
+// project. Clients should be reused instead of created per request. Call
+// [Client.Close] when finished.
 //
-// If the project ID is set to [DetectProjectID], NewClient will attempt to detect
-// the project ID from credentials.
+// The ctx argument is used only during client initialization (for credentials,
+// transport setup, and project autodetection when [DetectProjectID] is passed).
+// Subsequent RPC methods each use their own context argument. Credentials and
+// client options are bound at client creation time.
 func NewClient(ctx context.Context, projectID string, opts ...option.ClientOption) (*Client, error) {
 	o := []option.ClientOption{
 		option.WithScopes(Scope),
@@ -120,11 +153,26 @@ func NewClient(ctx context.Context, projectID string, opts ...option.ClientOptio
 	return c, nil
 }
 
-// EnableStorageReadClient sets up Storage API connection to be used when fetching
-// large datasets from tables, jobs or queries.
-// Currently out of pagination methods like PageInfo().Token and RowIterator.StartIndex
-// are not supported when the Storage API is enabled.
-// Calling this method twice will return an error.
+// EnableStorageReadClient opens a separate gRPC client for the BigQuery Storage
+// Read API to accelerate large table, job, and query reads. Calling this method
+// twice returns an error. Call it during client initialization before sharing
+// the client across goroutines.
+//
+// Storage Read requires the bigquery.readsessions.create IAM permission (and
+// bigquery.readsessions.getData to read streams). This method does not inherit
+// [option.ClientOption] values (such as credentials, endpoints, or quota
+// project) passed to [NewClient]. Pass them again here if needed.
+//
+// If read session setup fails (for example on views, external tables, or
+// missing permissions), reads silently fall back to the REST API. Single-page
+// [Query.Read] fast-path results also stay on REST. Check
+// [RowIterator.IsAccelerated] to confirm acceleration is active.
+//
+// When accelerated, [RowIterator.StartIndex] and [RowIterator.PageInfo]
+// pagination are unsupported, [RowIterator.TotalRows] is an estimate from the
+// read session, and callers should cancel the iterator's context if stopping
+// before [google.golang.org/api/iterator.Done] to avoid leaking background
+// reader goroutines.
 func (c *Client) EnableStorageReadClient(ctx context.Context, opts ...option.ClientOption) error {
 	if c.isStorageReadAvailable() {
 		return fmt.Errorf("failed: storage read client already set up")
@@ -147,9 +195,14 @@ func (c *Client) Project() string {
 	return c.projectID
 }
 
-// Close closes any resources held by the client.
-// Close should be called when the client is no longer needed.
-// It need not be called at program exit.
+// Close releases resources held by the client. Currently, Close only closes the
+// BigQuery Storage Read gRPC client when [Client.EnableStorageReadClient] was
+// called, and does not close idle HTTP connections on the underlying REST
+// transport.
+//
+// Close should be called when the client is no longer needed (especially when
+// Storage Read is enabled) to avoid leaking gRPC connections. Do not use the
+// client after calling Close. It need not be called at program exit.
 func (c *Client) Close() error {
 	if c.isStorageReadAvailable() {
 		err := c.rc.close()

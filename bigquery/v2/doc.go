@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package bigquery provides provides support for services within the
-// Google BigQuery ecosystem.  This root package provides no functionality at this
+// Package bigquery provides support for services within the
+// Google BigQuery ecosystem. This root package provides no functionality at this
 // time.
 //
 // This module is EXPERIMENTAL and subject to change or removal without notice.
+// For general BigQuery usage, use cloud.google.com/go/bigquery. For streaming
+// ingestion, use cloud.google.com/go/bigquery/storage/managedwriter.
 package bigquery
