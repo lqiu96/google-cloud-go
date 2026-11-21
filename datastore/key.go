@@ -28,6 +28,10 @@ import (
 )
 
 // Key represents the datastore key for a stored entity.
+//
+// On a top-level struct, a *Key field tagged `datastore:"__key__"` is populated
+// on reads and ignored on writes (the key argument passed to Put is used). On a
+// nested struct stored as an [Entity], that field sets the nested entity's key.
 type Key struct {
 	// Kind cannot be empty.
 	Kind string
@@ -40,8 +44,10 @@ type Key struct {
 
 	// Namespace provides the ability to partition your data for multiple
 	// tenants. In most cases, it is not necessary to specify a namespace.
+	// Every ancestor in a key's Parent chain must share the same Namespace, or
+	// Datastore operations fail with [ErrInvalidKey].
 	// See docs on datastore multitenancy for details:
-	// https://cloud.google.com/datastore/docs/concepts/multitenancy
+	// https://docs.cloud.google.com/datastore/docs/concepts/multitenancy
 	Namespace string
 }
 
@@ -113,8 +119,9 @@ func (k *Key) marshal(b *strings.Builder, includeSensitive bool) {
 	}
 }
 
-// String returns a string representation of the key. It does not include
-// the namespace in case that the Namespace's name is sensitive information.
+// String returns a string representation of the key. It omits the key's
+// Namespace in case tenant names are sensitive, so keys in different namespaces
+// can produce the same string.
 func (k *Key) String() string {
 	return k.string(false)
 }
@@ -191,12 +198,14 @@ func (k *Key) GobDecode(buf []byte) error {
 	return nil
 }
 
-// MarshalJSON marshals the key into JSON.
+// MarshalJSON marshals the key as a JSON string containing its [Key.Encode]
+// value.
 func (k *Key) MarshalJSON() ([]byte, error) {
 	return []byte(`"` + k.Encode() + `"`), nil
 }
 
-// UnmarshalJSON unmarshals a key JSON object into a Key.
+// UnmarshalJSON unmarshals a JSON string produced by [Key.MarshalJSON]
+// (containing a [Key.Encode] value) into k.
 func (k *Key) UnmarshalJSON(buf []byte) error {
 	if len(buf) < 2 || buf[0] != '"' || buf[len(buf)-1] != '"' {
 		return errors.New("datastore: bad JSON key")
@@ -209,9 +218,11 @@ func (k *Key) UnmarshalJSON(buf []byte) error {
 	return nil
 }
 
-// Encode returns an opaque representation of the key
-// suitable for use in HTML and URLs.
-// This is compatible with the Python and Java runtimes.
+// Encode returns an opaque URL-safe base64 representation of the key suitable
+// for use in HTML and URLs. The encoded form includes the key's path (kinds,
+// IDs or names, and parents) and namespace, but not the project ID or database
+// ID. Its format is incompatible with legacy App Engine (appengine/datastore)
+// encoded keys.
 func (k *Key) Encode() string {
 	pKey := keyToProto(k)
 
@@ -224,7 +235,9 @@ func (k *Key) Encode() string {
 	return strings.TrimRight(base64.URLEncoding.EncodeToString(b), "=")
 }
 
-// DecodeKey decodes a key from the opaque representation returned by Encode.
+// DecodeKey decodes a key from the opaque representation returned by
+// [Key.Encode]. It also accepts keys encoded by the legacy App Engine
+// (google.golang.org/appengine/datastore) package, dropping the legacy app ID.
 func DecodeKey(encoded string) (*Key, error) {
 	k, err := decodeCloudKey(encoded)
 	if err != nil {
@@ -256,8 +269,12 @@ func decodeCloudKey(encoded string) (*Key, error) {
 	return protoToKey(pKey)
 }
 
-// AllocateIDs accepts a slice of incomplete keys and returns a
-// slice of complete keys that are guaranteed to be valid in the datastore.
+// AllocateIDs accepts a slice of incomplete keys and returns a new slice of
+// complete keys in the same order without mutating the input keys.
+//
+// Every element in keys must be a valid incomplete key, and Cloud Datastore
+// allows at most 500 keys per call (callers must chunk larger slices). If keys
+// is nil, AllocateIDs returns (nil, nil).
 func (c *Client) AllocateIDs(ctx context.Context, keys []*Key) ([]*Key, error) {
 	if keys == nil {
 		return nil, nil
@@ -276,7 +293,12 @@ func (c *Client) AllocateIDs(ctx context.Context, keys []*Key) ([]*Key, error) {
 	return multiProtoToKey(resp.Keys)
 }
 
-// ReserveIDs accepts a slice of keys and prevents them from being auto-allocated by Datastore
+// ReserveIDs prevents the given complete keys from being auto-allocated by
+// Datastore.
+//
+// Every key must be complete with a numeric ID (not a string Name or an
+// incomplete key), and Cloud Datastore allows at most 500 keys per call
+// (callers must chunk larger slices). If keys is nil, ReserveIDs returns nil.
 func (c *Client) ReserveIDs(ctx context.Context, keys []*Key) error {
 	if keys == nil {
 		return nil
@@ -293,8 +315,10 @@ func (c *Client) ReserveIDs(ctx context.Context, keys []*Key) error {
 }
 
 // IncompleteKey creates a new incomplete key.
-// The supplied kind cannot be empty.
-// The namespace of the new key is empty.
+// The supplied kind cannot be empty, and parent must be a complete key or nil.
+// The new key's Namespace is empty, even if parent has a non-empty Namespace.
+// Set the returned key's Namespace to match parent.Namespace or Datastore
+// operations will fail with [ErrInvalidKey].
 func IncompleteKey(kind string, parent *Key) *Key {
 	return &Key{
 		Kind:   kind,
@@ -302,10 +326,11 @@ func IncompleteKey(kind string, parent *Key) *Key {
 	}
 }
 
-// NameKey creates a new key with a name.
-// The supplied kind cannot be empty.
-// The supplied parent must either be a complete key or nil.
-// The namespace of the new key is empty.
+// NameKey creates a new key with a string name.
+// The supplied kind cannot be empty, and parent must be a complete key or nil.
+// The new key's Namespace is empty, even if parent has a non-empty Namespace.
+// Set the returned key's Namespace to match parent.Namespace or Datastore
+// operations will fail with [ErrInvalidKey].
 func NameKey(kind, name string, parent *Key) *Key {
 	return &Key{
 		Kind:   kind,
@@ -314,10 +339,11 @@ func NameKey(kind, name string, parent *Key) *Key {
 	}
 }
 
-// IDKey creates a new key with an ID.
-// The supplied kind cannot be empty.
-// The supplied parent must either be a complete key or nil.
-// The namespace of the new key is empty.
+// IDKey creates a new key with a numeric ID.
+// The supplied kind cannot be empty, and parent must be a complete key or nil.
+// The new key's Namespace is empty, even if parent has a non-empty Namespace.
+// Set the returned key's Namespace to match parent.Namespace or Datastore
+// operations will fail with [ErrInvalidKey].
 func IDKey(kind string, id int64, parent *Key) *Key {
 	return &Key{
 		Kind:   kind,

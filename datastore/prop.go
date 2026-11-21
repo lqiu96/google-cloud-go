@@ -60,33 +60,45 @@ type Property struct {
 	// a nil-valued property into a struct will set that field to the zero
 	// value.
 	Value interface{}
-	// NoIndex is whether the datastore cannot index this property.
-	// If NoIndex is set to false, []byte and string values are limited to
-	// 1500 bytes.
+	// NoIndex controls whether Datastore excludes this property from indexes.
+	// Properties are indexed by default (NoIndex: false), including []byte
+	// values (which can be filtered in queries when indexed). Indexed string
+	// and []byte values are limited to 1,500 bytes, and an entity can have at
+	// most 20,000 indexed properties (counting each element of an indexed
+	// slice). All string values must be valid UTF-8.
 	NoIndex bool
 }
 
 // An Entity is the value type for a nested struct.
 // This type is only used for a Property's Value.
 type Entity struct {
+	// Key is the key of a nested entity, populated from a *Key field tagged
+	// `datastore:"__key__"` on a nested struct.
 	Key        *Key
 	Properties []Property
 }
 
-// PropertyLoadSaver can be converted from and to a slice of Properties.
+// PropertyLoadSaver can be converted from and to a slice of [Property] values.
+//
+// Implementations used as nested struct fields must define Load and Save on a
+// pointer receiver (value receivers return an error when loading or saving
+// nested fields).
 //
 // Warning: If a struct embeds another struct that implements PropertyLoadSaver,
-// the embedding struct will inherit the Load and Save methods. This means
-// that saving the embedding struct will only save the fields managed by the
-// embedded PropertyLoadSaver, ignoring the embedding struct's own fields.
-// To fix this, explicitly implement Load and Save methods on the embedding
-// struct.
+// the embedding struct inherits the Load and Save methods. Saving the embedding
+// struct will then save only the fields managed by the embedded
+// PropertyLoadSaver, silently dropping the embedding struct's own fields.
+// Explicitly implement Load and Save on the embedding struct to avoid this.
 type PropertyLoadSaver interface {
 	Load([]Property) error
 	Save() ([]Property, error)
 }
 
-// KeyLoader can store a Key.
+// KeyLoader can store a [Key] when loading an entity.
+//
+// When loading into a KeyLoader, LoadKey is called before Load. If LoadKey
+// returns an error, Load is still called, and the error from LoadKey takes
+// precedence over any error returned by Load.
 type KeyLoader interface {
 	// PropertyLoadSaver is embedded because a KeyLoader
 	// must also always implement PropertyLoadSaver.
@@ -275,13 +287,13 @@ func newStructPLS(p interface{}) (*structPLS, error) {
 	return &structPLS{v, f}, nil
 }
 
-// LoadStruct loads the properties from p to dst.
+// LoadStruct loads the properties from p into dst.
 // dst must be a struct pointer.
 //
-// The values of dst's unmatched struct fields are not modified,
-// and matching slice-typed fields are not reset before appending to
-// them. In particular, it is recommended to pass a pointer to a zero
-// valued struct on each LoadStruct call.
+// Unmatched struct fields in dst are not modified. Matching slice-typed fields
+// are overwritten starting at index 0, leaving any trailing elements from a
+// longer pre-populated slice intact. Always pass a pointer to a fresh
+// zero-valued struct on each LoadStruct call.
 func LoadStruct(dst interface{}, p []Property) error {
 	x, err := newStructPLS(dst)
 	if err != nil {
@@ -290,8 +302,22 @@ func LoadStruct(dst interface{}, p []Property) error {
 	return x.Load(p)
 }
 
-// SaveStruct returns the properties from src as a slice of Properties.
+// SaveStruct returns the properties from src as a slice of [Property] values.
 // src must be a struct pointer.
+//
+// Exported fields are indexed by default unless tagged `datastore:",noindex"`
+// (note the leading comma, as `datastore:"noindex"` renames the property to
+// "noindex"). When written to Datastore, indexed string and []byte values are
+// limited to 1,500 bytes, all strings must be valid UTF-8, and entities can
+// have at most 20,000 indexed properties. Because []byte is indexed by default,
+// byte slices up to 1,500 bytes can be filtered in queries (tag longer blobs
+// with ",noindex").
+//
+// Unsigned integers and Go map fields are unsupported (use [PropertyList] or
+// implement [PropertyLoadSaver] instead). Empty slices are always omitted on
+// save. A nil pointer to a struct is always omitted, whereas a nil pointer to a
+// supported basic type (or a nil interface value) saves a Datastore Null unless
+// tagged with "omitempty".
 func SaveStruct(src interface{}) ([]Property, error) {
 	x, err := newStructPLS(src)
 	if err != nil {
