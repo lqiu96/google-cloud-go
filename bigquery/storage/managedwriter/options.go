@@ -232,7 +232,13 @@ func WithTraceID(traceID string) WriterOption {
 }
 
 // WithSchemaDescriptor describes the format of the serialized data being sent by
-// AppendRows calls on the stream.
+// [ManagedStream.AppendRows] calls on the stream.
+//
+// For messages with nested messages, groups, or enums, normalize the descriptor
+// first using adapt.NormalizeDescriptor. Well-known types such as
+// google.protobuf.Timestamp are not supported directly for BigQuery TIMESTAMP
+// columns. Encode TIMESTAMP values as int64 epoch microseconds (see
+// https://docs.cloud.google.com/bigquery/docs/supported-data-types#supported_protocol_buffer_data_types).
 func WithSchemaDescriptor(dp *descriptorpb.DescriptorProto) WriterOption {
 	return func(ms *ManagedStream) {
 		ms.curTemplate = ms.curTemplate.revise(reviseProtoSchema(dp))
@@ -305,11 +311,15 @@ func WithAppendRowsCallOption(o gax.CallOption) WriterOption {
 	}
 }
 
-// EnableWriteRetries enables ManagedStream to automatically retry failed appends.
+// EnableWriteRetries configures [ManagedStream] to automatically retry failed
+// appends. Write retries are disabled by default (opt-in by passing true).
 //
-// Enabling retries is best suited for cases where users want to achieve at-least-once
-// append semantics.  Use of automatic retries may complicate patterns where the user
-// is designing for exactly-once append semantics.
+// Because the BigQuery Storage Write API closes idle connections after roughly
+// 10 minutes and periodically drains connections, leaving retries disabled causes
+// appends over idle or draining connections to fail with io.EOF, Unavailable, or
+// deadline errors. Enabling retries is recommended for at-least-once workloads
+// (such as [DefaultStream]). For exactly-once patterns, use an explicit stream
+// with [WithOffset].
 func EnableWriteRetries(enable bool) WriterOption {
 	return func(ms *ManagedStream) {
 		if enable {

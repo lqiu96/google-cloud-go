@@ -68,7 +68,14 @@ func streamTypeToEnum(t StreamType) storagepb.WriteStream_Type {
 	}
 }
 
-// ManagedStream is the abstraction over a single write stream.
+// ManagedStream is the abstraction over a single BigQuery Storage write stream.
+//
+// A ManagedStream is safe for concurrent [ManagedStream.AppendRows] calls from
+// multiple goroutines (sends are synchronized on the underlying connection, though
+// callers supplying explicit offsets via [WithOffset] must coordinate ordering).
+// Automatic write retries are disabled by default. Configure [EnableWriteRetries]
+// with true to recover from idle disconnects (roughly 10 minutes) and transient
+// errors. Call [ManagedStream.Close] when finished.
 type ManagedStream struct {
 	// Unique id for the managedstream instance.
 	id string
@@ -235,7 +242,9 @@ func (ms *ManagedStream) appendWithRetry(pw *pendingWrite) error {
 	}
 }
 
-// Close closes a managed stream.
+// Close closes a managed stream and releases its connection pool resources.
+// Always call Close when finished writing. Once closed, a ManagedStream cannot
+// be reopened.
 func (ms *ManagedStream) Close() error {
 
 	ms.mu.Lock()
@@ -279,17 +288,17 @@ func (ms *ManagedStream) buildRequest(data [][]byte) *storagepb.AppendRowsReques
 	}
 }
 
-// AppendRows sends the append requests to the service, and returns a single AppendResult for tracking
-// the set of data.
+// AppendRows sends the append request to the service and returns an [AppendResult]
+// for tracking completion. Pass a per-request context to bound the enqueue call,
+// and pass a per-request context to [AppendResult.GetResult] to bound waiting for
+// the server acknowledgement.
 //
-// The format of the row data is binary serialized protocol buffer bytes.  The message must be compatible
-// with the schema currently set for the stream.
+// The format of the row data is binary serialized protocol buffer bytes compatible
+// with the schema set for the stream. Use [WithOffset] to set an explicit offset
+// for user-created streams. Setting an offset on a [DefaultStream] is unsupported.
 //
-// Use the WithOffset() AppendOption to set an explicit offset for this append.  Setting an offset for
-// a default stream is unsupported.
-//
-// The size of a single request must be less than 10 MB in size.
-// Requests larger than this return an error, typically `INVALID_ARGUMENT`.
+// A single request (serialized rows plus request overhead) must be under 10 MB.
+// Larger requests fail with INVALID_ARGUMENT.
 func (ms *ManagedStream) AppendRows(ctx context.Context, data [][]byte, opts ...AppendOption) (*AppendResult, error) {
 	// before we do anything, ensure the writer isn't closed.
 	ms.mu.Lock()

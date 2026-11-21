@@ -25,9 +25,14 @@ import (
 	bq "google.golang.org/api/bigquery/v2"
 )
 
-// IAM provides access to an iam.Handle that allows access to IAM functionality for
-// the given BigQuery table.  For more information, see
-// https://pkg.go.dev/cloud.google.com/go/iam
+// IAM provides access to an [iam.Handle] that allows access to IAM functionality for
+// the given BigQuery table. For more information, see
+// https://pkg.go.dev/cloud.google.com/go/iam.
+//
+// Only IAM policy version 1 is supported. Requesting policy version 3 or conditional
+// IAM bindings fails on read, and binding conditions are not preserved on write.
+// Dataset-level access is managed via [DatasetMetadata.Access] rather than an IAM
+// method on [Dataset].
 func (t *Table) IAM() *iam.Handle {
 	return iam.InternalNewHandleClient(&bqIAMClient{
 		bqs: t.c.bqs,

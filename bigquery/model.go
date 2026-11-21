@@ -25,13 +25,13 @@ import (
 	bq "google.golang.org/api/bigquery/v2"
 )
 
-// Model represent a reference to a BigQuery ML model.
-// Within the API, models are used largely for communicating
-// statistical information about a given model, as creation of models is only
-// supported via BigQuery queries (e.g. CREATE MODEL .. AS ..).
+// Model represents a reference to a BigQuery ML model.
+// Creating a handle via [Dataset.Model] does not perform a network call.
+// Models have no Create method and are created only via BigQuery SQL queries
+// (such as CREATE MODEL ... AS ...).
 //
-// For more info, see documentation for Bigquery ML,
-// see: https://cloud.google.com/bigquery/docs/bigqueryml
+// For more information about BigQuery ML, see
+// https://docs.cloud.google.com/bigquery/docs/bqml-introduction.
 type Model struct {
 	ProjectID string
 	DatasetID string
@@ -43,15 +43,16 @@ type Model struct {
 }
 
 // Identifier returns the ID of the model in the requested format.
+// Only [LegacySQLID] and [StandardSQLID] are supported.
 //
-// For Standard SQL format, the identifier will be quoted if the
-// ProjectID contains dash (-) characters.
+// For [StandardSQLID], the entire project.dataset.model identifier is
+// backtick-quoted if any component contains a dash (-) character.
 func (m *Model) Identifier(f IdentifierFormat) (string, error) {
 	switch f {
 	case LegacySQLID:
 		return fmt.Sprintf("%s:%s.%s", m.ProjectID, m.DatasetID, m.ModelID), nil
 	case StandardSQLID:
-		// Per https://cloud.google.com/bigquery-ml/docs/reference/standard-sql/bigqueryml-syntax-create#model_name
+		// Per https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/bigqueryml-syntax-create#model_name
 		// we quote the entire identifier.
 		out := fmt.Sprintf("%s.%s.%s", m.ProjectID, m.DatasetID, m.ModelID)
 		if strings.Contains(out, "-") {
@@ -63,7 +64,9 @@ func (m *Model) Identifier(f IdentifierFormat) (string, error) {
 	}
 }
 
-// FullyQualifiedName returns the ID of the model in projectID:datasetID.modelid format.
+// FullyQualifiedName returns the ID of the model in Legacy SQL
+// projectID:datasetID.modelID format (unlike [Routine.FullyQualifiedName],
+// which uses Standard SQL format).
 func (m *Model) FullyQualifiedName() string {
 	s, _ := m.Identifier(LegacySQLID)
 	return s
@@ -98,7 +101,10 @@ func (m *Model) Metadata(ctx context.Context) (mm *ModelMetadata, err error) {
 	return bqToModelMetadata(model), nil
 }
 
-// Update updates mutable fields in an ML model.
+// Update modifies mutable fields in an ML model using HTTP PATCH.
+// Only non-nil fields in mm are updated. Pass etag from a prior [Model.Metadata]
+// call for optimistic concurrency control (If-Match, failing with HTTP 412 on
+// concurrent writes), or pass "" for a blind write.
 func (m *Model) Update(ctx context.Context, mm ModelMetadataToUpdate, etag string) (md *ModelMetadata, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/bigquery.Model.Update")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -203,15 +209,15 @@ func (mm *ModelMetadata) RawTrainingRuns() []*TrainingRun {
 	return runs
 }
 
-// RawLabelColumns exposes the underlying label columns used to train an ML model and uses types from
-// "google.golang.org/api/bigquery/v2", which are subject to change without warning.
+// RawLabelColumns exposes the label columns used to train an ML model as
+// [StandardSQLField] values defined in this package.
 // It is EXPERIMENTAL and subject to change or removal without notice.
 func (mm *ModelMetadata) RawLabelColumns() ([]*StandardSQLField, error) {
 	return bqToModelCols(mm.labelColumns)
 }
 
-// RawFeatureColumns exposes the underlying feature columns used to train an ML model and uses types from
-// "google.golang.org/api/bigquery/v2", which are subject to change without warning.
+// RawFeatureColumns exposes the feature columns used to train an ML model as
+// [StandardSQLField] values defined in this package.
 // It is EXPERIMENTAL and subject to change or removal without notice.
 func (mm *ModelMetadata) RawFeatureColumns() ([]*StandardSQLField, error) {
 	return bqToModelCols(mm.featureColumns)
@@ -250,8 +256,12 @@ func bqToModelMetadata(m *bq.Model) *ModelMetadata {
 	}
 }
 
-// ModelMetadataToUpdate is used when updating an ML model's metadata.
-// Only non-nil fields will be updated.
+// ModelMetadataToUpdate is used when updating an ML model's metadata via [Model.Update].
+// Only non-nil fields are updated.
+//
+// Fields typed as optional.String accept plain string values (not *string) and
+// panic at runtime if given another type. Use SetLabel and DeleteLabel to add,
+// modify, or remove labels.
 type ModelMetadataToUpdate struct {
 	// The user-friendly description of this model.
 	Description optional.String
@@ -259,8 +269,9 @@ type ModelMetadataToUpdate struct {
 	// The user-friendly name of this model.
 	Name optional.String
 
-	// The time when this model expires.  To remove a model's expiration,
-	// set ExpirationTime to NeverExpire.  The zero value is ignored.
+	// The time when this model expires. To remove a model's expiration,
+	// set ExpirationTime to [NeverExpire]. The zero value is ignored.
+	// Valid expiration times are between years 1678 and 2262.
 	ExpirationTime time.Time
 
 	// The model's encryption configuration.
