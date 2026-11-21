@@ -37,35 +37,50 @@ var (
 )
 
 // NullInt64 represents a BigQuery INT64 that may be NULL.
+//
+// Like all Null* types in this package, NullInt64 implements
+// [encoding/json.Marshaler] and [encoding/json.Unmarshaler], not
+// database/sql.Scanner or database/sql/driver.Valuer. For nullable BYTES,
+// NUMERIC, BIGNUMERIC, INTERVAL, RANGE, or nested RECORD columns, use []byte,
+// *big.Rat, *[IntervalValue], *[RangeValue], or a struct pointer (with the
+// bigquery:",nullable" tag for [InferSchema]) instead of a Null* wrapper.
 type NullInt64 struct {
 	Int64 int64
 	Valid bool // Valid is true if Int64 is not NULL.
 }
 
+// String returns the formatted value, or "NULL" if Valid is false.
 func (n NullInt64) String() string { return nullstr(n.Valid, n.Int64) }
 
 // NullString represents a BigQuery STRING that may be NULL.
+// Note that the value field is named StringVal (unlike database/sql.NullString).
 type NullString struct {
 	StringVal string
 	Valid     bool // Valid is true if StringVal is not NULL.
 }
 
+// String returns StringVal, or "NULL" if Valid is false.
 func (n NullString) String() string { return nullstr(n.Valid, n.StringVal) }
 
 // NullGeography represents a BigQuery GEOGRAPHY string that may be NULL.
+// Note that the value field is named GeographyVal.
 type NullGeography struct {
 	GeographyVal string
 	Valid        bool // Valid is true if GeographyVal is not NULL.
 }
 
+// String returns GeographyVal, or "NULL" if Valid is false.
 func (n NullGeography) String() string { return nullstr(n.Valid, n.GeographyVal) }
 
 // NullJSON represents a BigQuery JSON string that may be NULL.
+// Note that the value field is named JSONVal, and [NullJSON.MarshalJSON]
+// marshals JSONVal as a JSON-encoded string literal rather than raw JSON.
 type NullJSON struct {
 	JSONVal string
 	Valid   bool // Valid is true if JSONVal is not NULL.
 }
 
+// String returns JSONVal, or "NULL" if Valid is false.
 func (n NullJSON) String() string { return nullstr(n.Valid, n.JSONVal) }
 
 // NullFloat64 represents a BigQuery FLOAT64 that may be NULL.
@@ -74,6 +89,7 @@ type NullFloat64 struct {
 	Valid   bool // Valid is true if Float64 is not NULL.
 }
 
+// String returns the formatted value, or "NULL" if Valid is false.
 func (n NullFloat64) String() string { return nullstr(n.Valid, n.Float64) }
 
 // NullBool represents a BigQuery BOOL that may be NULL.
@@ -82,30 +98,37 @@ type NullBool struct {
 	Valid bool // Valid is true if Bool is not NULL.
 }
 
+// String returns the formatted value, or "NULL" if Valid is false.
 func (n NullBool) String() string { return nullstr(n.Valid, n.Bool) }
 
-// NullTimestamp represents a BigQuery TIMESTAMP that may be null.
+// NullTimestamp represents a BigQuery TIMESTAMP that may be NULL.
 type NullTimestamp struct {
 	Timestamp time.Time
-	Valid     bool // Valid is true if Time is not NULL.
+	Valid     bool // Valid is true if Timestamp is not NULL.
 }
 
+// String returns the formatted value, or "NULL" if Valid is false.
 func (n NullTimestamp) String() string { return nullstr(n.Valid, n.Timestamp) }
 
-// NullDate represents a BigQuery DATE that may be null.
+// NullDate represents a BigQuery DATE (using [civil.Date]) that may be NULL.
 type NullDate struct {
 	Date  civil.Date
 	Valid bool // Valid is true if Date is not NULL.
 }
 
+// String returns the formatted value, or "NULL" if Valid is false.
 func (n NullDate) String() string { return nullstr(n.Valid, n.Date) }
 
-// NullTime represents a BigQuery TIME that may be null.
+// NullTime represents a BigQuery TIME (using [civil.Time], microsecond
+// precision) that may be NULL.
 type NullTime struct {
 	Time  civil.Time
 	Valid bool // Valid is true if Time is not NULL.
 }
 
+// String returns the formatted time using [CivilTimeString], or "<null>" if
+// Valid is false (unlike other Null* types except [NullDateTime], which return
+// "NULL").
 func (n NullTime) String() string {
 	if !n.Valid {
 		return "<null>"
@@ -113,12 +136,16 @@ func (n NullTime) String() string {
 	return CivilTimeString(n.Time)
 }
 
-// NullDateTime represents a BigQuery DATETIME that may be null.
+// NullDateTime represents a BigQuery DATETIME (using [civil.DateTime],
+// microsecond precision) that may be NULL.
 type NullDateTime struct {
 	DateTime civil.DateTime
 	Valid    bool // Valid is true if DateTime is not NULL.
 }
 
+// String returns the formatted date-time using [CivilDateTimeString], or
+// "<null>" if Valid is false (unlike other Null* types except [NullTime], which
+// return "NULL").
 func (n NullDateTime) String() string {
 	if !n.Valid {
 		return "<null>"
@@ -155,7 +182,8 @@ func (n NullString) MarshalJSON() ([]byte, error) { return nulljson(n.Valid, n.S
 // MarshalJSON converts the NullGeography to JSON.
 func (n NullGeography) MarshalJSON() ([]byte, error) { return nulljson(n.Valid, n.GeographyVal) }
 
-// MarshalJSON converts the NullJSON to JSON.
+// MarshalJSON converts the NullJSON to JSON. When Valid is true, JSONVal is
+// marshaled as a JSON-encoded string literal rather than raw JSON.
 func (n NullJSON) MarshalJSON() ([]byte, error) { return nulljson(n.Valid, n.JSONVal) }
 
 // MarshalJSON converts the NullTimestamp to JSON.

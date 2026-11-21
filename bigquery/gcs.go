@@ -22,6 +22,13 @@ import (
 
 // GCSReference is a reference to one or more Google Cloud Storage objects, which together constitute
 // an input or output to a BigQuery operation.
+//
+// For load jobs, format and schema options live on the embedded [FileConfig]
+// rather than on [Loader]. When a GCSReference is passed to [Table.ExtractorTo]
+// or [Model.ExtractorTo] as an extract destination, only URIs,
+// DestinationFormat, Compression, and FieldDelimiter are used. All other
+// embedded [FileConfig] fields (such as SourceFormat, Schema, AutoDetect,
+// Quote, and SkipLeadingRows) are ignored.
 type GCSReference struct {
 	// URIs refer to Google Cloud Storage objects.
 	URIs []string
@@ -29,7 +36,9 @@ type GCSReference struct {
 	FileConfig
 
 	// DestinationFormat is the format to use when writing exported files.
-	// Allowed values are: CSV, Avro, JSON.  The default is CSV.
+	// Allowed values for tables are [CSV], [Avro], [JSON], and [Parquet].
+	// Allowed values for ML models are [TFSavedModel] and [XGBoostBooster].
+	// The default for table exports is [CSV].
 	// CSV is not supported for tables with nested or repeated fields.
 	DestinationFormat DataFormat
 
@@ -43,10 +52,10 @@ type GCSReference struct {
 
 // NewGCSReference constructs a reference to one or more Google Cloud Storage objects, which together constitute a data source or destination.
 // In the simple case, a single URI in the form gs://bucket/object may refer to a single GCS object.
-// Data may also be split into mutiple files, if multiple URIs or URIs containing wildcards are provided.
+// Data may also be split into multiple files, if multiple URIs or URIs containing wildcards are provided.
 // Each URI may contain one '*' wildcard character, which (if present) must come after the bucket name.
 // For more information about the treatment of wildcards and multiple URIs,
-// see https://cloud.google.com/bigquery/exporting-data-from-bigquery#exportingmultiple
+// see https://docs.cloud.google.com/bigquery/docs/exporting-data#exporting_data_into_one_or_more_files
 func NewGCSReference(uri ...string) *GCSReference {
 	return &GCSReference{URIs: uri}
 }

@@ -51,7 +51,8 @@ type CopyConfig struct {
 	CreateDisposition TableCreateDisposition
 
 	// WriteDisposition specifies how existing data in the destination table is treated.
-	// The default is WriteEmpty.
+	// The default for copy jobs is [WriteEmpty] (unlike [LoadConfig], which
+	// defaults to [WriteAppend]).
 	WriteDisposition TableWriteDisposition
 
 	// The labels associated with this job.
@@ -60,8 +61,10 @@ type CopyConfig struct {
 	// Custom encryption configuration (e.g., Cloud KMS keys).
 	DestinationEncryptionConfig *EncryptionConfig
 
-	// One of the supported operation types when executing a Table Copy jobs.  By default this
-	// copies tables, but can also be set to perform snapshot or restore operations.
+	// One of the supported operation types when executing a table copy job. By default this
+	// copies tables ([CopyOperation]), and can also be set to perform snapshot
+	// ([SnapshotOperation]), restore ([RestoreOperation]), or clone ([CloneOperation])
+	// operations.
 	OperationType TableCopyOperationType
 
 	// Sets a best-effort deadline on a specific job.  If job execution exceeds this
@@ -81,9 +84,9 @@ type CopyConfig struct {
 	// `projects/{project}/locations/{location}/reservations/{reservation}`.
 	Reservation string
 
-	// A target limit on the rate of slot consumption by this query. If set to a
+	// A target limit on the rate of slot consumption by this copy job. If set to a
 	// value > 0, BigQuery will attempt to limit the rate of slot consumption by
-	// this query to keep it below the configured limit, even if the query is
+	// this copy job to keep it below the configured limit, even if the copy job is
 	// eligible for more slots based on fair scheduling. The unused slots will be
 	// available for other jobs and queries to use.
 	//

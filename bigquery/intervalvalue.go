@@ -21,14 +21,21 @@ import (
 	"time"
 )
 
-// IntervalValue is a go type for representing BigQuery INTERVAL values.
+// IntervalValue is a Go type for representing BigQuery INTERVAL values.
 // Intervals are represented using three distinct parts:
-// * Years and Months
-// * Days
-// * Time (Hours/Mins/Seconds/Fractional Seconds).
+//   - Years and Months
+//   - Days
+//   - Time (Hours/Mins/Seconds/Fractional Seconds)
+//
+// Use *IntervalValue with the bigquery:",nullable" tag for nullable INTERVAL
+// fields in [InferSchema]. Note that while *IntervalValue works with
+// [InferSchema], [QueryParameter], [StructSaver], and *[]Value or
+// *map[string]Value reads, [RowIterator.Next] cannot currently scan INTERVAL
+// columns into struct fields, and Storage Read API Arrow decoding does not
+// currently support INTERVAL columns.
 //
 // More information about BigQuery INTERVAL types can be found at:
-// https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types#interval_type
+// https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-types#interval_type
 //
 // IntervalValue is EXPERIMENTAL and subject to change or removal without notice.
 type IntervalValue struct {
@@ -37,8 +44,8 @@ type IntervalValue struct {
 	Years  int32
 	Months int32
 
-	// In canonical form, Days are independent of the other parts and can have it's
-	// own sign.  There is no attempt to reduce larger Day values into the Y-M part.
+	// In canonical form, Days are independent of the other parts and can have its
+	// own sign. There is no attempt to reduce larger Day values into the Y-M part.
 	Days int32
 
 	// In canonical form, the time parts all share a consistent sign and are reduced.

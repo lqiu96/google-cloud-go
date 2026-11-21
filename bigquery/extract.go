@@ -33,6 +33,8 @@ type ExtractConfig struct {
 	SrcModel *Model
 
 	// Dst is the destination into which the data will be extracted.
+	// Only URIs, DestinationFormat, Compression, and FieldDelimiter on Dst are
+	// used for extract jobs. Other embedded [FileConfig] fields are ignored.
 	Dst *GCSReference
 
 	// DisableHeader disables the printing of a header row in exported data.
@@ -65,9 +67,9 @@ type ExtractConfig struct {
 	// `projects/{project}/locations/{location}/reservations/{reservation}`.
 	Reservation string
 
-	// A target limit on the rate of slot consumption by this query. If set to a
+	// A target limit on the rate of slot consumption by this extract job. If set to a
 	// value > 0, BigQuery will attempt to limit the rate of slot consumption by
-	// this query to keep it below the configured limit, even if the query is
+	// this extract job to keep it below the configured limit, even if the extract job is
 	// eligible for more slots based on fair scheduling. The unused slots will be
 	// available for other jobs and queries to use.
 	//
@@ -129,16 +131,18 @@ func bqToExtractConfig(q *bq.JobConfiguration, c *Client) *ExtractConfig {
 	}
 }
 
-// An Extractor extracts data from a BigQuery table into Google Cloud Storage.
+// An Extractor extracts data from a BigQuery table or ML model into Google Cloud Storage.
 type Extractor struct {
 	JobIDConfig
 	ExtractConfig
 	c *Client
 }
 
-// ExtractorTo returns an Extractor which can be used to extract data from a
+// ExtractorTo returns an [Extractor] which can be used to extract data from a
 // BigQuery table into Google Cloud Storage.
-// The returned Extractor may optionally be further configured before its Run method is called.
+// The returned Extractor may optionally be further configured before its [Extractor.Run] method is called.
+// Only URIs, DestinationFormat, Compression, and FieldDelimiter on dst are
+// used. Other embedded [FileConfig] fields on dst are ignored.
 func (t *Table) ExtractorTo(dst *GCSReference) *Extractor {
 	return &Extractor{
 		c: t.c,
@@ -149,9 +153,12 @@ func (t *Table) ExtractorTo(dst *GCSReference) *Extractor {
 	}
 }
 
-// ExtractorTo returns an Extractor which can be persist a BigQuery Model into
+// ExtractorTo returns an [Extractor] which can persist a BigQuery [Model] into
 // Google Cloud Storage.
-// The returned Extractor may be further configured before its Run method is called.
+// The returned Extractor may be further configured before its [Extractor.Run] method is called.
+// Only URIs, DestinationFormat (such as [TFSavedModel] or [XGBoostBooster]),
+// Compression, and FieldDelimiter on dst are read. Other embedded [FileConfig]
+// fields on dst are ignored.
 func (m *Model) ExtractorTo(dst *GCSReference) *Extractor {
 	return &Extractor{
 		c: m.c,

@@ -25,18 +25,32 @@ import (
 )
 
 // NoDedupeID indicates a streaming insert row wants to opt out of best-effort
-// deduplication.
+// deduplication. Omitting insert IDs can increase streaming throughput, but
+// automatic retries on transient errors may insert duplicate rows.
 // It is EXPERIMENTAL and subject to change or removal without notice.
 const NoDedupeID = "NoDedupeID"
 
-// An Inserter does streaming inserts into a BigQuery table.
-// It is safe for concurrent use.
+// An Inserter does streaming inserts into a BigQuery table using the legacy
+// streaming API (tabledata.insertAll). Streamed rows enter a temporary
+// streaming buffer that can take up to 90 minutes to flush to managed storage,
+// and are excluded from [TableMetadata.NumRows], [TableMetadata.NumBytes], and
+// [RowIterator.TotalRows] until flushed. Deleting and recreating a table
+// shortly before streaming can return 404 or drop rows for several minutes due
+// to metadata eventual consistency.
+//
+// For new or high-throughput streaming workloads, prefer
+// cloud.google.com/go/bigquery/storage/managedwriter.
+//
+// An Inserter is safe for concurrent calls to [Inserter.Put] only after its
+// exported configuration fields have been set.
 type Inserter struct {
 	t *Table
 
-	// SkipInvalidRows causes rows containing invalid data to be silently
-	// ignored. The default value is false, which causes the entire request to
-	// fail if there is an attempt to insert an invalid row.
+	// SkipInvalidRows allows valid rows in a batch to be inserted even when
+	// other rows fail validation. Invalid rows are still reported in the
+	// returned [PutMultiError] and are not silently ignored. The default value
+	// is false, which causes the entire batch to be rejected if any row is
+	// invalid.
 	SkipInvalidRows bool
 
 	// IgnoreUnknownValues causes values not matching the schema to be ignored.
@@ -56,15 +70,20 @@ type Inserter struct {
 	// called <table> + <suffix>.
 	//
 	// More information is available at
-	// https://cloud.google.com/bigquery/streaming-data-into-bigquery#template-tables
+	// https://docs.cloud.google.com/bigquery/docs/write-api-rest#template-tables
 	TableTemplateSuffix string
 }
 
-// Inserter returns an Inserter that can be used to append rows to t.
-// The returned Inserter may optionally be further configured before its Put method is called.
+// Inserter returns an [Inserter] that can be used to append rows to t using the
+// legacy streaming API (tabledata.insertAll). The returned Inserter may
+// optionally be further configured before its [Inserter.Put] method is called.
+// For new or high-throughput streaming workloads, prefer
+// cloud.google.com/go/bigquery/storage/managedwriter.
 //
-// To stream rows into a date-partitioned table at a particular date, add the
-// $yyyymmdd suffix to the table name when constructing the Table.
+// To stream rows into a specific partition of an ingestion-time partitioned
+// table, add the $yyyymmdd partition decorator suffix to the table ID when
+// constructing the [Table]. Partition decorators on column-partitioned tables
+// require every row's partition column to match the target partition.
 func (t *Table) Inserter() *Inserter {
 	return &Inserter{t: t}
 }
@@ -75,23 +94,37 @@ func (t *Table) Uploader() *Inserter { return t.Inserter() }
 
 // Put uploads one or more rows to the BigQuery service.
 //
-// If src is ValueSaver, then its Save method is called to produce a row for uploading.
+// If src implements [ValueSaver], its Save method is called to produce a row
+// for uploading. Pass *[StructSaver] (or []*[StructSaver]) rather than a value
+// StructSaver, which returns an error.
 //
-// If src is a struct or pointer to a struct, then a schema is inferred from it
-// and used to create a StructSaver. The InsertID of the StructSaver will be
-// empty.
+// If src is a struct or pointer to a struct, a schema is inferred from its
+// exported fields (see [InferSchema]) and used to create a [StructSaver].
+// Unexported struct fields are silently skipped.
 //
-// If src is a slice of ValueSavers, structs, or struct pointers, then each
-// element of the slice is treated as above, and multiple rows are uploaded.
+// If src is a slice of [ValueSaver] values, structs, or struct pointers, each
+// element of the slice is treated as above and uploaded in a single batch. An
+// empty slice is a no-op and returns nil without making a network request.
 //
-// Put returns a PutMultiError if one or more rows failed to be uploaded.
-// The PutMultiError contains a RowInsertionError for each failed row.
+// When a row's InsertID is empty (including when passing structs directly), Put
+// automatically generates a random insert ID per row before retrying to enable
+// best-effort deduplication across retries. To opt out of deduplication for
+// higher throughput, wrap rows in *[StructSaver] or implement [ValueSaver] with
+// [NoDedupeID]. Note that retries may then insert duplicate rows.
 //
-// Put will retry on temporary errors (see
-// https://cloud.google.com/bigquery/troubleshooting-errors). This can result
-// in duplicate rows if you do not use insert IDs. Also, if the error persists,
-// the call will run indefinitely. Pass a context with a timeout to prevent
-// hanging calls.
+// Streaming inserts return HTTP 200 even when individual rows fail validation.
+// When one or more rows are rejected, Put returns a [PutMultiError] containing
+// a [RowInsertionError] (with a 0-based RowIndex) for each failed row. Setting
+// SkipInvalidRows allows valid sibling rows to succeed, while still returning
+// [PutMultiError] for the rejected rows.
+//
+// Put retries transient request errors until ctx is canceled or expires, so
+// always pass a context with a deadline. Row-level errors returned in
+// [PutMultiError] are not retried automatically. See
+// https://docs.cloud.google.com/bigquery/docs/errors for API HTTP status and
+// error reason codes, and
+// https://docs.cloud.google.com/bigquery/docs/error-messages for client and
+// connectivity errors.
 func (u *Inserter) Put(ctx context.Context, src any) (err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/bigquery.Inserter.Put")
 	defer func() { trace.EndSpan(ctx, err) }()

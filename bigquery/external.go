@@ -108,15 +108,17 @@ type ExternalDataConfig struct {
 	// and it must come after the 'bucket' name. Size limits related to load jobs
 	// apply to external data sources.
 	//
-	// For Google Cloud Bigtable URIs, exactly one URI can be specified and it has be
+	// For Google Cloud Bigtable URIs, exactly one URI can be specified and it must be
 	// a fully specified and valid HTTPS URL for a Google Cloud Bigtable table.
 	//
 	// For Google Cloud Datastore backups, exactly one URI can be specified. Also,
 	// the '*' wildcard character is not allowed.
 	SourceURIs []string
 
-	// The schema of the data. Required for CSV and JSON; disallowed for the
-	// other formats.
+	// The schema of the data. Required for CSV and JSON unless AutoDetect is
+	// true. Explicit schemas are also supported for formats such as Avro,
+	// Parquet, and Google Sheets, while formats such as Bigtable configure
+	// column mappings through Options instead.
 	Schema Schema
 
 	// Try to detect schema and format options automatically.
@@ -138,7 +140,8 @@ type ExternalDataConfig struct {
 	// when reading data.
 	MaxBadRecords int64
 
-	// Additional options for CSV, GoogleSheets, Bigtable, and Parquet formats.
+	// Additional format-specific options for Avro, CSV, JSON, GoogleSheets,
+	// Bigtable, and Parquet formats.
 	Options ExternalDataConfigOptions
 
 	// HivePartitioningOptions allows use of Hive partitioning based on the
@@ -146,9 +149,9 @@ type ExternalDataConfig struct {
 	HivePartitioningOptions *HivePartitioningOptions
 
 	// DecimalTargetTypes allows selection of how decimal values are converted when
-	// processed in bigquery, subject to the value type having sufficient precision/scale
-	// to support the values.  In the order of NUMERIC, BIGNUMERIC, and STRING, a type is
-	// selected if is present in the list and if supports the necessary precision and scale.
+	// processed in BigQuery, subject to the value type having sufficient precision/scale
+	// to support the values. In the order of NUMERIC, BIGNUMERIC, and STRING, a type is
+	// selected if it is present in the list and supports the necessary precision and scale.
 	//
 	// StringTargetType supports all precision and scale values.
 	DecimalTargetTypes []DecimalTargetType
@@ -282,12 +285,13 @@ func bqToExternalDataConfig(q *bq.ExternalDataConfiguration) (*ExternalDataConfi
 }
 
 // ExternalDataConfigOptions are additional options for external data configurations.
-// This interface is implemented by CSVOptions, GoogleSheetsOptions and BigtableOptions.
+// This interface is implemented by *[AvroOptions], *[CSVOptions], *[JSONOptions],
+// *[GoogleSheetsOptions], *[BigtableOptions], and *[ParquetOptions].
 type ExternalDataConfigOptions interface {
 	populateExternalDataConfig(*bq.ExternalDataConfiguration)
 }
 
-// AvroOptions are additional options for Avro external data data sources.
+// AvroOptions are additional options for Avro external data sources.
 type AvroOptions struct {
 	// UseAvroLogicalTypes indicates whether to interpret logical types as the
 	// corresponding BigQuery data type (for example, TIMESTAMP), instead of using
@@ -514,8 +518,8 @@ type BigtableColumnFamily struct {
 
 	// Lists of columns that should be exposed as individual fields as opposed to a
 	// list of (column name, value) pairs. All columns whose qualifier matches a
-	// qualifier in this list can be accessed as .. Other columns can be accessed as
-	// a list through .Column field.
+	// qualifier in this list can be accessed as <family field name>.<column field name>.
+	// Other columns can be accessed as a list through the <family field name>.column field.
 	Columns []*BigtableColumn
 
 	// The encoding of the values when the type is not STRING. Acceptable encoding values are:
@@ -573,8 +577,8 @@ func bqToBigtableColumnFamily(q *bq.BigtableColumnFamily) (*BigtableColumnFamily
 // BigtableColumn describes how BigQuery should access a Bigtable column.
 type BigtableColumn struct {
 	// Qualifier of the column. Columns in the parent column family that have this
-	// exact qualifier are exposed as . field. The column field name is the
-	// same as the column qualifier.
+	// exact qualifier are exposed as a <family field name>.<column field name>
+	// field. The default column field name is the same as the column qualifier.
 	Qualifier string
 
 	// If the qualifier is not a valid BigQuery field identifier i.e. does not match

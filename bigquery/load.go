@@ -37,7 +37,8 @@ type LoadConfig struct {
 	CreateDisposition TableCreateDisposition
 
 	// WriteDisposition specifies how existing data in the destination table is treated.
-	// The default is WriteAppend.
+	// The default for load jobs is [WriteAppend] (unlike [QueryConfig] and
+	// [CopyConfig], which default to [WriteEmpty]).
 	WriteDisposition TableWriteDisposition
 
 	// The labels associated with this job.
@@ -60,7 +61,9 @@ type LoadConfig struct {
 	SchemaUpdateOptions []string
 
 	// For Avro-based loads, controls whether logical type annotations are used.
-	// See https://cloud.google.com/bigquery/docs/loading-data-cloud-storage-avro#logical_types
+	// If [FileConfig.AvroOptions] is also set on the [LoadSource],
+	// AvroOptions.UseAvroLogicalTypes takes precedence over this field.
+	// See https://docs.cloud.google.com/bigquery/docs/loading-data-cloud-storage-avro#logical_types
 	// for additional information.
 	UseAvroLogicalTypes bool
 
@@ -73,9 +76,9 @@ type LoadConfig struct {
 	HivePartitioningOptions *HivePartitioningOptions
 
 	// DecimalTargetTypes allows selection of how decimal values are converted when
-	// processed in bigquery, subject to the value type having sufficient precision/scale
-	// to support the values.  In the order of NUMERIC, BIGNUMERIC, and STRING, a type is
-	// selected if is present in the list and if supports the necessary precision and scale.
+	// processed in BigQuery, subject to the value type having sufficient precision/scale
+	// to support the values. In the order of NUMERIC, BIGNUMERIC, and STRING, a type is
+	// selected if it is present in the list and supports the necessary precision and scale.
 	//
 	// StringTargetType supports all precision and scale values.
 	DecimalTargetTypes []DecimalTargetType
@@ -95,7 +98,7 @@ type LoadConfig struct {
 	ReferenceFileSchemaURI string
 
 	// If true, creates a new session, where session id will
-	// be a server generated random id. If false, runs query with an
+	// be a server generated random id. If false, runs the load job with an
 	// existing session_id passed in ConnectionProperty, otherwise runs the
 	// load job in non-session mode.
 	CreateSession bool
@@ -118,9 +121,9 @@ type LoadConfig struct {
 	// `projects/{project}/locations/{location}/reservations/{reservation}`.
 	Reservation string
 
-	// A target limit on the rate of slot consumption by this query. If set to a
+	// A target limit on the rate of slot consumption by this load job. If set to a
 	// value > 0, BigQuery will attempt to limit the rate of slot consumption by
-	// this query to keep it below the configured limit, even if the query is
+	// this load job to keep it below the configured limit, even if the load job is
 	// eligible for more slots based on fair scheduling. The unused slots will be
 	// available for other jobs and queries to use.
 	//
@@ -204,7 +207,12 @@ func bqToLoadConfig(q *bq.JobConfiguration, c *Client) *LoadConfig {
 	return lc
 }
 
-// A Loader loads data from Google Cloud Storage into a BigQuery table.
+// A Loader loads data from a [LoadSource] (such as a [GCSReference] or
+// [ReaderSource]) into a BigQuery table.
+//
+// Format and parsing options (such as SourceFormat, Schema, and AutoDetect)
+// are configured on the [LoadSource] via its embedded [FileConfig], not on
+// Loader.
 type Loader struct {
 	JobIDConfig
 	LoadConfig
@@ -221,10 +229,10 @@ type LoadSource interface {
 	populateLoadConfig(*bq.JobConfigurationLoad) io.Reader
 }
 
-// LoaderFrom returns a Loader which can be used to load data into a BigQuery table.
-// The returned Loader may optionally be further configured before its Run method is called.
-// See GCSReference and ReaderSource for additional configuration options that
-// affect loading.
+// LoaderFrom returns a [Loader] which can be used to load data into a BigQuery table.
+// The returned Loader may optionally be further configured before its [Loader.Run] method is called.
+// Format and schema options (such as SourceFormat, Schema, and AutoDetect) live
+// on src ([GCSReference] or [ReaderSource] via [FileConfig]) rather than on Loader.
 func (t *Table) LoaderFrom(src LoadSource) *Loader {
 	return &Loader{
 		c: t.c,
@@ -236,6 +244,9 @@ func (t *Table) LoaderFrom(src LoadSource) *Loader {
 }
 
 // Run initiates a load job.
+//
+// Load jobs created from a [ReaderSource] are not automatically retried on
+// transient errors because the underlying [io.Reader] cannot be rewound.
 func (l *Loader) Run(ctx context.Context) (j *Job, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/bigquery.Load.Run")
 	defer func() { trace.EndSpan(ctx, err) }()
@@ -266,7 +277,7 @@ var (
 	StringTargetType DecimalTargetType = "STRING"
 )
 
-// ColumnNameCharacterMap is used to specific column naming behavior for load jobs.
+// ColumnNameCharacterMap is used to specify column naming behavior for load jobs.
 type ColumnNameCharacterMap string
 
 var (

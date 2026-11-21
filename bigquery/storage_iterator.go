@@ -365,16 +365,31 @@ func (it *storageArrowIterator) Schema() Schema {
 	return it.schema
 }
 
-// IsAccelerated check if the current RowIterator is
-// being accelerated by Storage API.
+// IsAccelerated reports whether the current [RowIterator] is accelerated by the
+// BigQuery Storage Read API (configured via [Client.EnableStorageReadClient]).
+//
+// Because read session setup silently falls back to the REST API on errors or
+// unsupported sources (such as views, missing bigquery.readsessions.create
+// permission, or single-page fast-path queries), call IsAccelerated to verify
+// acceleration is active. When true, [RowIterator.StartIndex] and
+// [RowIterator.PageInfo] pagination are unsupported, [RowIterator.TotalRows] is
+// an estimate, BigQuery INTERVAL columns are currently unsupported during
+// built-in Arrow decoding, and callers should cancel the iterator's context if
+// stopping before [iterator.Done] to avoid leaking background goroutines.
 func (it *RowIterator) IsAccelerated() bool {
 	return it.arrowIterator != nil
 }
 
-// ArrowIterator gives access to the raw Arrow Record Batch stream to be consumed directly.
+// ArrowIterator returns the underlying [ArrowIterator] for consuming raw
+// serialized Apache Arrow record batches directly from the Storage Read API.
+// Returns an error if [RowIterator.IsAccelerated] is false.
+//
+// Do not mix [RowIterator.Next] and [ArrowIterator.Next] calls on the same
+// iterator. Cancel the iterator's context if stopping before [iterator.Done] to
+// release background stream workers.
+//
 // Experimental: this interface is experimental and may be modified or removed in future versions,
 // regardless of any other documented package stability guarantees.
-// Don't try to mix RowIterator.Next and ArrowIterator.Next calls.
 func (it *RowIterator) ArrowIterator() (ArrowIterator, error) {
 	if !it.IsAccelerated() {
 		// TODO: can we convert plain RowIterator based on JSON API to an Arrow Stream ?
