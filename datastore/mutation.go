@@ -82,6 +82,13 @@ func (m *Mutation) WithTransforms(transforms ...PropertyTransform) *Mutation {
 // [NewInsert] or [NewDelete] records an error returned by [Client.Mutate] or
 // [Transaction.Mutate]).
 //
+// Each path is a Datastore property name (or dot-separated nested property path
+// such as "meta.reviewer"), not a Go struct field name. Only properties listed
+// in the mask are modified; unlisted properties on an existing entity are left
+// untouched. Warning: listing a path in WithPropertyMask that is omitted from
+// src (for example, via `omitempty`, an empty slice, or omission from a
+// [PropertyList]) deletes that property on the server.
+//
 // If paths is empty, no properties are overwritten. Combine an empty
 // WithPropertyMask() call with [Mutation.WithTransforms] to apply server-side
 // transforms without overwriting existing properties. If WithPropertyMask is not

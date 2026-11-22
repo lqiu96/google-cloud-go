@@ -325,7 +325,8 @@ func (q *Query) EventualConsistency() *Query {
 }
 
 // Namespace returns a derivative query that is associated with the given
-// namespace.
+// namespace. Because [Query] is immutable, the caller must capture the returned
+// query (for example, q = q.Namespace(ns)).
 //
 // A namespace may be used to partition data for multi-tenant applications.
 // For details, see https://docs.cloud.google.com/datastore/docs/concepts/multitenancy.
@@ -950,7 +951,9 @@ func (c *Client) run(ctx context.Context, q *Query, opts ...RunOption) *Iterator
 // RunAggregationQuery executes aq and returns its [AggregationResult].
 //
 // Each value in the returned map has concrete type *datastorepb.Value (from
-// cloud.google.com/go/datastore/apiv1/datastorepb).
+// cloud.google.com/go/datastore/apiv1/datastorepb). For [AggregationQuery.WithAvg],
+// if zero entities match, the returned *datastorepb.Value holds a protobuf
+// NullValue.
 func (c *Client) RunAggregationQuery(ctx context.Context, aq *AggregationQuery) (ar AggregationResult, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/datastore.Query.RunAggregationQuery")
 	defer func() { trace.EndSpan(ctx, err) }()

@@ -346,15 +346,18 @@ func (c *Client) newTransaction(ctx context.Context, s *transactionSettings) (_ 
 // RunInTransaction retries up to 3 times by default (configurable with
 // [MaxAttempts], which ignores non-positive values) when f or Commit returns a
 // retryable gRPC error: Aborted ([ErrConcurrentTransaction]), DeadlineExceeded,
-// Internal, Canceled, Unknown, or Unauthenticated. [ReadOnly] transactions also
-// retry on transient errors. Before each retry, on a non-retryable error, or if
-// f panics, the transaction is rolled back automatically (panics are propagated
-// after rollback).
+// Internal, Canceled, Unknown, or Unauthenticated (other gRPC errors, including
+// ResourceExhausted, and application errors are not retried). [ReadOnly]
+// transactions also retry on transient errors. Before each retry, on a
+// non-retryable error, or if f panics, the transaction is rolled back
+// automatically (panics are propagated after rollback).
 //
 // Inside f, perform all transactional reads and writes via tx or
 // [Query.Transaction] rather than standalone [Client] methods. Writes are
 // buffered locally until Commit and are not visible to reads or queries in the
 // same transaction. Enqueued writes on a [ReadOnly] transaction fail at Commit.
+// To create a parent and child entity together in one transaction, pre-allocate
+// the parent key with [Client.AllocateIDs] before starting the transaction.
 // Calling code must not assume changes are committed until RunInTransaction
 // returns a nil error.
 //

@@ -305,13 +305,18 @@ func LoadStruct(dst interface{}, p []Property) error {
 // SaveStruct returns the properties from src as a slice of [Property] values.
 // src must be a struct pointer.
 //
-// Exported fields are indexed by default unless tagged `datastore:",noindex"`
-// (note the leading comma, as `datastore:"noindex"` renames the property to
-// "noindex"). When written to Datastore, indexed string and []byte values are
-// limited to 1,500 bytes, all strings must be valid UTF-8, and entities can
-// have at most 20,000 indexed properties. Because []byte is indexed by default,
-// byte slices up to 1,500 bytes can be filtered in queries (tag longer blobs
-// with ",noindex").
+// Exported fields are indexed by default unless tagged with the "noindex"
+// option: `datastore:"<name>,noindex"` (for example, `datastore:"body,noindex"`)
+// or `datastore:",noindex"`. An empty name before the comma
+// (`datastore:",noindex"`) stores the property under the Go exported field name
+// (e.g. "Body", not "body"), so keep the property name before the comma when
+// using a custom or lowercase name; omitting the comma (`datastore:"noindex"`)
+// renames the property to "noindex" and leaves it indexed. When written to
+// Datastore, indexed string and []byte values are limited to 1,500 bytes, all
+// strings must be valid UTF-8, and entities can have at most 20,000 indexed
+// properties. Because []byte is indexed by default, byte slices up to 1,500
+// bytes can be filtered in queries (tag longer blobs with
+// `datastore:"<name>,noindex"` or `datastore:",noindex"`).
 //
 // Unsigned integers and Go map fields are unsupported (use [PropertyList] or
 // implement [PropertyLoadSaver] instead). Empty slices are always omitted on

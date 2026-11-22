@@ -173,9 +173,13 @@ there is no separate ByteString type, and []byte values up to 1,500 bytes can
 be filtered in queries directly). Indexed string and []byte properties are
 limited to 1,500 bytes, strings must be valid UTF-8, and an entity may have at
 most 20,000 indexed properties (counting each element of an indexed slice).
-Tag fields holding longer strings or binary blobs with a leading comma,
-`datastore:",noindex"`. Omitting the leading comma (`datastore:"noindex"`)
-renames the property to "noindex" and leaves it indexed.
+Tag fields holding longer strings or binary blobs with `datastore:"<name>,noindex"`
+(for example, `datastore:"body,noindex"`) or `datastore:",noindex"` (with a
+comma before "noindex"). An empty name before the comma (`datastore:",noindex"`)
+stores the property under the Go exported field name (for example, "Body", not
+"body"), so when using a custom or lowercase property name you must keep the
+name before the comma (`datastore:"body,noindex"`). Omitting the comma entirely
+(`datastore:"noindex"`) renames the property to "noindex" and leaves it indexed.
 
 For a nested struct field, the options may also include "flatten". This
 indicates that the immediate fields and any nested substruct fields of the
@@ -189,7 +193,7 @@ If the options is "" then the comma may be omitted.
 Example code:
 
 	// A and B are renamed to a and b.
-	// A, C and J are not indexed.
+	// A, C and J are not indexed (C is stored as "C"; J is stored as "j" in both datastore and json).
 	// D's tag is equivalent to having no tag at all (E).
 	// I is ignored entirely by the datastore.
 	// J has tag information for both the datastore and json packages.
@@ -200,7 +204,7 @@ Example code:
 		D int `datastore:""`
 		E int
 		I int `datastore:"-"`
-		J int `datastore:",noindex" json:"j"`
+		J int `datastore:"j,noindex" json:"j"`
 	}
 
 # Slice Fields
@@ -302,8 +306,9 @@ implements [PropertyLoadSaver], the outer struct inherits its Load and Save
 methods and silently drops the outer struct's own fields unless the outer
 struct implements Load and Save explicitly.
 
-If an outer struct is tagged "noindex" then all of its implicit flattened
-fields are effectively "noindex".
+If an outer struct field is tagged with the "noindex" option (for example,
+`datastore:"<name>,noindex"` or `datastore:",noindex"`) then all of its
+implicit flattened fields are effectively "noindex".
 
 If the Inner struct contains a *Key field with the name "__key__", like so:
 

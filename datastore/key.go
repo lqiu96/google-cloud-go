@@ -272,6 +272,11 @@ func decodeCloudKey(encoded string) (*Key, error) {
 // AllocateIDs accepts a slice of incomplete keys and returns a new slice of
 // complete keys in the same order without mutating the input keys.
 //
+// AllocateIDs is commonly used to pre-allocate a parent key before creating
+// parent and child entities together inside a single [Client.RunInTransaction]
+// (since keys minted during a transaction are only resolved via [Commit.Key]
+// after commit).
+//
 // Every element in keys must be a valid incomplete key. Requests are subject
 // to Datastore's 10 MiB maximum API request size, so callers should chunk very
 // large slices. If keys is nil, AllocateIDs returns (nil, nil).

@@ -562,7 +562,9 @@ func (c *Client) Get(ctx context.Context, key *Key, dst interface{}) (err error)
 //
 // Datastore allows at most 1,000 keys per lookup request, and GetMulti does not
 // automatically chunk larger slices. Deferred keys in a lookup response are
-// fetched automatically.
+// fetched automatically. Unlike [Client.PutMulti] and [Client.Mutate] writes,
+// GetMulti deduplicates equal keys client-side and populates every matching dst
+// slot.
 //
 // Per-entity errors (such as [ErrNoSuchEntity] or *[ErrFieldMismatch]) are
 // returned as a [MultiError] aligned 1:1 with keys, while whole-call RPC or
@@ -754,8 +756,13 @@ type PutRequest struct {
 // Put returns a newly generated complete key and does not mutate the input key.
 //
 // All struct fields are indexed by default. Strings and []byte values longer
-// than 1,500 bytes must be tagged `datastore:",noindex"`, strings must be valid
-// UTF-8, and an entity may have at most 20,000 indexed properties.
+// than 1,500 bytes must include the "noindex" tag option: use
+// `datastore:"<name>,noindex"` (for example, `datastore:"body,noindex"`) to
+// keep a custom or lowercase property name, or `datastore:",noindex"` to store
+// under the Go exported field name (an empty name before the comma uses the Go
+// field name, e.g. "Body", not "body"; omitting the comma renames the property
+// to "noindex" and leaves it indexed). Strings must be valid UTF-8, and an
+// entity may have at most 20,000 indexed properties.
 func (c *Client) Put(ctx context.Context, key *Key, src interface{}) (*Key, error) {
 	return c.PutWithOptions(ctx, &PutRequest{Key: key, Entity: src})
 }
@@ -1022,7 +1029,10 @@ func deleteMutations(keys []*Key) ([]*pb.Mutation, error) {
 // Mutate applies one or more mutations in NON_TRANSACTIONAL mode (not atomic
 // across entities). If you need atomicity, use [Transaction.Mutate]. Requests
 // are subject to Datastore's 10 MiB maximum API request size, and Mutate does
-// not automatically chunk larger batches.
+// not automatically chunk larger batches. Duplicate write mutations
+// ([NewInsert], [NewUpsert], [NewUpdate]) targeting the same key in a single
+// Mutate call fail on the server (only [NewDelete] mutations are deduplicated
+// client-side).
 //
 // Mutate returns the keys of muts in the same order without mutating incomplete
 // input keys. If any mutation has a client-side validation error, Mutate returns
