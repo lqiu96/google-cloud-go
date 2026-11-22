@@ -64,10 +64,13 @@ func setClientHeader(headers http.Header) {
 //
 // Most RPCs automatically retry transient transport, HTTP 5xx (500, 502, 503,
 // and 504), and selected structured BigQuery error reasons using hardcoded
-// exponential backoff until the context expires. Always pass a context with a
-// deadline. Unstructured HTTP 429 responses, quotaExceeded errors,
-// [ReaderSource] loads, and [Dataset.Create], [Routine.Create], [Model.Delete],
-// and [Routine.Delete] are not retried automatically.
+// exponential backoff (gax.Backoff with Initial: 1s, Max: 32s, Multiplier: 2)
+// until the context expires. Always pass a context with a deadline, and avoid
+// wrapping RPCs in short per-attempt context timeouts inside an outer retry
+// loop (which resets internal backoff to 1s on each attempt). Unstructured
+// HTTP 429 responses, quotaExceeded errors, [ReaderSource] loads, and
+// [Dataset.Create], [Routine.Create], [Model.Delete], and [Routine.Delete] are
+// not retried automatically.
 type Client struct {
 	// Location, if set, is used as the default location for subsequent dataset
 	// creation, job submission ([Query.Run], [Loader.Run], [Extractor.Run],

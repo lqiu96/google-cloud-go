@@ -85,8 +85,14 @@ type FileConfig struct {
 	// be used to customize how bad records are handled.
 	IgnoreUnknownValues bool
 
-	// Schema describes the data. It is required when reading CSV or JSON data,
-	// unless the data is being loaded into a table that already exists.
+	// Schema describes the data. For CSV and JSON sources, it is required when
+	// creating a new table unless AutoDetect is true.
+	//
+	// When appending to an existing table ([WriteAppend], the default for load
+	// jobs), leave Schema nil so BigQuery inherits the destination table's
+	// schema. Passing an explicit Schema where [FieldSchema.Required] defaults
+	// to false (NULLABLE) against REQUIRED columns in the destination table
+	// fails the load job with HTTP 400.
 	Schema Schema
 
 	// Additional options for CSV files.

@@ -395,10 +395,18 @@ func (c *Client) Query(q string) *Query {
 // inspect [Job.LastStatus] directly without calling [Job.Status], [Job.Wait],
 // or [Job.Read].
 //
-// If the submitted job fails with a transient job error (such as
-// jobRateLimitExceeded or other temporary reasons listed at
-// https://docs.cloud.google.com/bigquery/docs/errors), submit a new query with
-// a new job ID rather than retrying or polling the failed job.
+// Run automatically retries transient RPC errors using exponential backoff
+// (gax.Backoff with Initial: 1s, Max: 32s, Multiplier: 2) until ctx is done.
+// If you implement an outer retry loop for unstructured HTTP 429 responses or
+// terminal job failures (such as jobBackendError, jobInternalError, or
+// jobRateLimitExceeded, which require submitting a new query with a new job ID
+// rather than retrying or polling the failed job; see
+// https://docs.cloud.google.com/bigquery/docs/errors), pass the overall
+// deadline ctx to Run rather than a short per-attempt context timeout.
+// Canceling Run on a short per-attempt timeout resets the SDK's internal
+// backoff back to 1s on every outer attempt, amplifying request volume. Use
+// outer exponential backoff (Initial >= 1s, Max >= 32s) when resubmitting
+// failed jobs.
 func (q *Query) Run(ctx context.Context) (j *Job, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/bigquery.Query.Run")
 	defer func() { trace.EndSpan(ctx, err) }()

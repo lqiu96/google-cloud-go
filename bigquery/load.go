@@ -38,7 +38,11 @@ type LoadConfig struct {
 
 	// WriteDisposition specifies how existing data in the destination table is treated.
 	// The default for load jobs is [WriteAppend] (unlike [QueryConfig] and
-	// [CopyConfig], which default to [WriteEmpty]).
+	// [CopyConfig], which default to [WriteEmpty]). When appending to an
+	// existing table, leave [FileConfig.Schema] nil on the [LoadSource] so
+	// BigQuery inherits the destination table's schema (passing an explicit
+	// schema where [FieldSchema.Required] defaults to false against REQUIRED
+	// destination columns fails with HTTP 400).
 	WriteDisposition TableWriteDisposition
 
 	// The labels associated with this job.
@@ -247,6 +251,10 @@ func (t *Table) LoaderFrom(src LoadSource) *Loader {
 //
 // Load jobs created from a [ReaderSource] are not automatically retried on
 // transient errors because the underlying [io.Reader] cannot be rewound.
+// When appending to an existing table ([WriteAppend]), leave
+// [FileConfig.Schema] nil on the [LoadSource] so BigQuery inherits the
+// destination table's schema rather than failing with HTTP 400 on
+// NULLABLE-vs-REQUIRED field mode mismatches.
 func (l *Loader) Run(ctx context.Context) (j *Job, err error) {
 	ctx = trace.StartSpan(ctx, "cloud.google.com/go/bigquery.Load.Run")
 	defer func() { trace.EndSpan(ctx, err) }()

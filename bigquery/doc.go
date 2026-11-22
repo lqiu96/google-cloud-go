@@ -415,14 +415,24 @@ Most RPCs automatically retry transient network and transport errors, HTTP 5xx
 responses (500, 502, 503, and 504), and selected structured BigQuery error
 reasons (such as backendError and rateLimitExceeded, plus jobRateLimitExceeded
 and internalError when enqueuing jobs or polling query results via [Job.Wait]
-and [Job.Read]) using hardcoded exponential backoff until the context is
-canceled or expires. Polling retries do not rerun a failed job. Always pass a
-context with a deadline or timeout, because retries have no fixed maximum
-attempt limit.
+and [Job.Read]) using hardcoded exponential backoff (gax.Backoff with Initial:
+1s, Max: 32s, Multiplier: 2) until the context is canceled or expires. Polling
+retries do not rerun a failed job. Always pass a context with a deadline or
+timeout, because retries have no fixed maximum attempt limit.
 
 Automatic retries do not apply to unstructured HTTP 429 responses (without a
 structured rateLimitExceeded reason), quotaExceeded errors, loads from a
 [ReaderSource], or [Dataset.Create], [Routine.Create], [Model.Delete], and
 [Routine.Delete].
+
+When implementing an outer retry loop for errors the client does not
+automatically retry (such as unstructured HTTP 429 responses or terminal job
+errors like jobBackendError, jobInternalError, and jobRateLimitExceeded that
+require submitting a new job), pass the overall deadline context to [Query.Run]
+and other RPCs rather than a short per-attempt context timeout. Canceling a call
+on a short per-attempt timeout resets the SDK's internal backoff back to 1s on
+every outer attempt, amplifying request volume under sustained throttling or
+errors. Use outer exponential backoff (Initial >= 1s, Max >= 32s) when
+resubmitting failed jobs or retrying unstructured HTTP 429 responses.
 */
 package bigquery // import "cloud.google.com/go/bigquery"
